@@ -8,6 +8,8 @@
 	<string>@ANON_APP_NAME@</string>
 	<key>CFBundleExecutable</key>
 	<string>@ANON_APP_NAME@</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>@ANON_ID_FCP_APP@</string>
 	<key>CFBundleInfoDictionaryVersion</key>

@@ -1,4 +1,4 @@
-# Multi-Layer Anonymizer
+# Redact Anonymizer
 
 A native, Metal-accelerated anonymization effect for **Adobe Premiere Pro**,
 **DaVinci Resolve**, **Final Cut Pro / Motion**, and **Adobe Photoshop**
@@ -17,7 +17,26 @@ effect:
    colours no longer equal the source averages that block-matching
    depixelation tools such as Depix compare against. **Colour Noise**
    optionally adds a separate offset per colour channel, shifting each cell's
-   hue as well.
+   hue as well. The offsets are fixed for the whole clip rather than redrawn
+   every frame, so cells do not flicker (and averaging frames cannot cancel
+   them out); the Session Key still makes them new on every launch.
+
+The layers change colour only: every pixel keeps its own alpha, so a matte
+the host passes in alpha (such as a Resolve power window) keeps its exact
+shape rather than being warped and pixelated along with the image. When the
+host marks its images premultiplied (Resolve does), the layers run on the
+un-premultiplied colour, with colour from inside the matte extended past
+its edge, so no black is pulled in along the window edge; the result is
+premultiplied by the original matte again.
+
+Optionally, a **Frosted Glass** finish turns the result into a softened,
+lightened and grained surface. It runs after the three layers and only
+sees their output, so it changes the look without weakening anything.
+
+Before version 2.0 the effect was called **Multi-Layer Anonymizer**. Only
+the visible name changed - the internal identifiers did not, so existing
+projects keep working, and the installer removes the old-named Final Cut
+Pro app and template.
 
 | Before | After (default settings) |
 |---|---|
@@ -44,14 +63,18 @@ but they do not guarantee that identifying information is unrecoverable.
 | Mosaic Block Size | 30 | Pixelation block size (minimum 21) |
 | Mosaic Shape | Square | Square, Triangle, or Hexagon tiling |
 | Cell Noise | 3 % | Random brightness offset per mosaic cell (up to ±25 % of full range) |
-| Colour Noise | 1 % | Random per-channel offset per mosaic cell (up to ±25 % of full range) |
+| Colour Noise | 1 % | Random hue shift per mosaic cell, brightness unchanged (up to ±25 % of full range; 2.5× with Blur After Mosaic, as that blur averages most of it away) |
 | Blur After Mosaic | Off | Runs distortion → mosaic → blur to soften visible cell edges |
 | Random Seed | 0 | Change for a different distortion pattern (0–16,777,215) |
 | Randomize Seed | — | Button: picks a new random seed |
 | Session Key | On | Mixes in an unrecorded random key that changes every time the app launches |
 | Temporal Jitter | On | New distortion pattern every frame |
+| Smooth Jitter | On | With Temporal Jitter: the pattern flows smoothly between frames instead of changing abruptly |
 | Blackout | Off | Solid black instead of the distort/blur/mosaic stack (source alpha preserved) |
 | Desaturate | 0 % | Removes colour (Rec. 709 luma), e.g. to hide skin tone or clothing colour |
+| Frosted Glass | Off | Finishes the result as frosted glass: extra blur, lift toward the Frost Colour, still grain |
+| Frost Amount | 40 % | How far Frosted Glass lifts the region toward the Frost Colour |
+| Frost Colour | 75 % grey | Tint of the frosted glass (full white tends to be too bright) |
 
 Enable **Blur After Mosaic** for a softer appearance with less visible tiling.
 Enabling it raises Blur Radius from the default 20 to 40; customized values are
@@ -94,6 +117,23 @@ Temporal Jitter trade-off: **on** prevents an attacker from treating the warp as
 a fixed transform across frames (and looks "alive"); **off** gives a static
 warp, which avoids any multi-frame averaging of a static background revealing
 detail. For moving subjects, keep it on.
+
+Smooth Jitter (on by default): plain Temporal Jitter draws an unrelated
+pattern on every frame, which some viewers find busy. With Smooth Jitter, a
+new pattern is drawn every 12 frames and the warp blends between them, with
+weights chosen so the distortion strength stays constant. The warp still never repeats or
+stays fixed across the clip, but neighbouring frames now share most of their
+pattern, so it reads as gently flowing glass rather than flicker.
+
+Frosted Glass: the finish blurs the anonymized result again (wide enough to
+melt the mosaic cells), lifts it toward the Frost Colour (75 % grey by default) by Frost
+Amount and adds a
+fine grain that stays still. Because it only ever sees the output of the
+distortion/blur/mosaic stack, it cannot reveal anything those layers
+removed. A translucent white over a merely blurred image would be no
+protection at all, since it can be subtracted again; here the white
+covers an already anonymized image. Note that it does not hide the
+silhouette any more than the mosaic does.
 
 ## Requirements
 
@@ -139,7 +179,7 @@ cmake --build build
 ```
 
 Restart Premiere Pro. The effect appears in the Effects panel under
-**Video Effects → Aagedal → Multi-Layer Anonymizer**. To limit it to a face or
+**Video Effects → Aagedal → Redact Anonymizer**. To limit it to a face or
 plate, use Premiere's built-in effect masks in the Effect Controls panel
 (ellipse/pen mask + tracking), like with any other effect.
 
@@ -163,7 +203,7 @@ has been targeted; non-Metal hosts use the CPU path.
 ### Final Cut Pro / Motion (FxPlug 4)
 
 With the [FxPlug 4 SDK](https://developer.apple.com/download/all/?q=FxPlug)
-installed, the build also produces `build/Multi-Layer Anonymizer.app` — an
+installed, the build also produces `build/Redact Anonymizer.app` — an
 FxPlug wrapper app carrying the effect as an XPC service, plus the Motion
 template FCP needs (bundled in the app's Resources). Install with:
 
@@ -174,7 +214,7 @@ template FCP needs (bundled in the app's Resources). Install with:
 Launching the app once registers the plugin with PluginKit and copies the
 Motion template into `~/Movies/Motion Templates.localized/`. Restart Final
 Cut Pro; the effect appears in the Effects browser under
-**Aagedal → Multi-Layer Anonymizer**. Use FCP's Draw Mask/Shape Mask on the
+**Aagedal → Redact Anonymizer**. Use FCP's Draw Mask/Shape Mask on the
 effect to confine it. Notes:
 
 - **Final Cut Pro never lists raw FxPlug filters** — they only appear
@@ -201,7 +241,7 @@ pass pipeline (CPU path). Install with:
 ```
 
 Restart Photoshop; the filter appears under **Filter → Aagedal →
-Multi-Layer Anonymizer…** and works on RGB and Grayscale documents at 8, 16,
+Redact Anonymizer…** and works on RGB and Grayscale documents at 8, 16,
 and 32 bits per channel, respecting selections. Parameter values carry the
 same 1080p-reference semantics as the video hosts, scaled by the document's
 shorter dimension. The filter is not yet recordable with parameters in
@@ -224,7 +264,7 @@ To distribute instead of installing directly, build an installer package
 containing all plugins (each selectable at install time):
 
 ```sh
-./scripts/make_pkg.sh  # -> build/MultiLayerAnonymizer-<version>.pkg
+./scripts/make_pkg.sh  # -> build/RedactAnonymizer-<version>.pkg
 ```
 
 The pkg installs the plugins system-wide. For recipients outside your own
@@ -237,7 +277,7 @@ are blocked by Gatekeeper until right-click → Open.
 
 The effect name, category, bundle identifiers, and installer branding are
 set at configure time from `editions/<name>.cmake` (default: `oss`, the
-Multi-Layer Anonymizer). To build a custom-branded edition, copy
+Redact Anonymizer). To build a custom-branded edition, copy
 `editions/oss.cmake` to `editions/yourname.cmake`, change the values
 (generate fresh UUIDs for the FxPlug entries), and configure with
 `-DANON_EDITION=yourname` into its own build directory:

@@ -1,5 +1,5 @@
 /*
-** Multi-Layer Anonymizer OFX - Metal host code.
+** Redact Anonymizer OFX - Metal host code.
 **
 ** Reuses the exact same MSL kernels as the Premiere Pro plugin
 ** (shared/AnonymizerKernel.h). Resolve hands the plugin an MTLCommandQueue
@@ -20,25 +20,13 @@
 #include "AnonymizerKernel.h"
 #include "AnonymizerAlgo.h"
 
-// Must match AnonRenderSettings in AnonymizerOFX.cpp.
-struct AnonRenderSettings
+// The layered-pass kernels (ANON_KERNEL_*), then blackout.
+enum { kKernelBlackout = ANON_KERNEL_LAYER_COUNT, kKernelCount };
+
+static const char* KernelName(int k)
 {
-	float distortAmount;
-	float distortScale;
-	float blurRadius;
-	float mosaicSize;
-	uint32_t seed;
-	bool blackout;
-	int mosaicShape;
-	bool blurAfterMosaic;
-	float desaturate; // 0..1
-	float cellNoise; // 0..1
-	float colorNoise; // 0..1
-};
-
-
-enum { kKernelDistort = 0, kKernelBlur, kKernelMosaic, kKernelBlackout, kKernelCount };
-static const char* const kKernelNames[kKernelCount] = { "AnonDistort", "AnonBlur", "AnonMosaic", "AnonBlackout" };
+	return k == kKernelBlackout ? "AnonBlackout" : kAnonLayerKernelNames[k];
+}
 
 struct AnonPipelines
 {
@@ -78,7 +66,7 @@ static bool GetPipelines(id<MTLCommandQueue> p_Queue, AnonPipelines& outPipeline
 	for (int k = 0; k < kKernelCount; ++k)
 	{
 		id<MTLFunction> function = [library newFunctionWithName:
-			[NSString stringWithUTF8String:kKernelNames[k]]];
+			[NSString stringWithUTF8String:KernelName(k)]];
 		if (!function)
 		{
 			[library release];
@@ -89,7 +77,7 @@ static bool GetPipelines(id<MTLCommandQueue> p_Queue, AnonPipelines& outPipeline
 		if (!pipelines.p[k])
 		{
 			fprintf(stderr, "Anonymizer OFX: failed to create pipeline %s: %s\n",
-				kKernelNames[k], err.localizedDescription.UTF8String);
+				KernelName(k), err.localizedDescription.UTF8String);
 			[library release];
 			return false;
 		}
@@ -106,12 +94,14 @@ static void DispatchPass(
 	id<MTLComputePipelineState> p_Pipeline,
 	id<MTLBuffer> p_Src,
 	id<MTLBuffer> p_Dst,
-	const AnonParamsHost& p_Params)
+	const AnonParamsHost& p_Params,
+	id<MTLBuffer> p_Aux = nil)
 {
 	[p_Encoder setComputePipelineState:p_Pipeline];
 	[p_Encoder setBuffer:p_Src offset:0 atIndex:0];
 	[p_Encoder setBuffer:p_Dst offset:0 atIndex:1];
 	[p_Encoder setBytes:&p_Params length:sizeof(p_Params) atIndex:2];
+	[p_Encoder setBuffer:(p_Aux ? p_Aux : p_Src) offset:0 atIndex:3];
 	MTLSize threadsPerGroup = {16, 16, 1};
 	MTLSize numThreadgroups = {
 		(NSUInteger)((p_Params.mWidth + 15) / 16),
@@ -121,7 +111,7 @@ static void DispatchPass(
 }
 
 void RunMetalAnonymizer(void* p_CmdQ, int p_Width, int p_Height,
-	const float* p_Input, float* p_Output, const AnonRenderSettings& p_Settings)
+	const float* p_Input, float* p_Output, const AnonAlgo::LayerSettings& p_Settings, bool p_Blackout)
 {
 	// Plugins must not rely on a host autorelease pool.
 	@autoreleasepool {
@@ -136,69 +126,34 @@ void RunMetalAnonymizer(void* p_CmdQ, int p_Width, int p_Height,
 	id<MTLBuffer> srcBuffer = reinterpret_cast<id<MTLBuffer>>(const_cast<float*>(p_Input));
 	id<MTLBuffer> dstBuffer = reinterpret_cast<id<MTLBuffer>>(p_Output);
 
-	// Zero-mean the displacement field (see AnonAlgo::DisplacementBias).
-	float distortBiasDx = 0.0f, distortBiasDy = 0.0f;
-	AnonAlgo::DisplacementBias(p_Width, p_Height, p_Settings.distortScale, p_Settings.seed,
-		&distortBiasDx, &distortBiasDy);
-
-	AnonParamsHost params = {};
-	params.mSrcPitch = p_Width;
-	params.mDstPitch = p_Width;
-	params.m16f = 0;
-	params.mWidth = p_Width;
-	params.mHeight = p_Height;
-	params.mDistortAmount = p_Settings.distortAmount;
-	params.mDistortScale = p_Settings.distortScale;
-	params.mBlurRadius = std::min((int)ceilf(p_Settings.blurRadius), 512);
-	params.mBlurSigma = std::max(p_Settings.blurRadius * 0.5f, 0.1f);
-	params.mMosaicSize = p_Settings.mosaicSize;
-	params.mMosaicShape = p_Settings.mosaicShape;
-	params.mSeed = p_Settings.seed;
-	params.mDistortBiasDx = distortBiasDx;
-	params.mDistortBiasDy = distortBiasDy;
-	params.mDesaturate = p_Settings.desaturate;
-	params.mCellNoise = p_Settings.cellNoise;
-	params.mColorNoise = p_Settings.colorNoise;
-	params.mChannelOrder = ANON_ORDER_RGBA;
-
 	id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
 	commandBuffer.label = @"MultiLayerAnonymizer";
 	id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
 
-	if (p_Settings.blackout)
+	if (p_Blackout)
 	{
+		AnonParamsHost params = {};
+		params.mSrcPitch = p_Width;
+		params.mDstPitch = p_Width;
+		params.mWidth = p_Width;
+		params.mHeight = p_Height;
 		DispatchPass(encoder, pipelines.p[kKernelBlackout], srcBuffer, dstBuffer, params);
 		[encoder endEncoding];
 		[commandBuffer commit];
 		return;
 	}
 
-	// Two packed temp buffers for the pass chain:
-	// Distortion, then blur/mosaic in the selected order; result in dst.
+	// Two packed temp buffers for the pass chain; result in dst.
 	const size_t tmpBytes = (size_t)p_Width * p_Height * 4 * sizeof(float);
 	id<MTLBuffer> tmpA = [device newBufferWithLength:tmpBytes options:MTLResourceStorageModePrivate];
 	id<MTLBuffer> tmpB = [device newBufferWithLength:tmpBytes options:MTLResourceStorageModePrivate];
 
-	DispatchPass(encoder, pipelines.p[kKernelDistort], srcBuffer, tmpA, params);
-	if (p_Settings.blurAfterMosaic && params.mBlurRadius >= 1)
-	{
-		DispatchPass(encoder, pipelines.p[kKernelMosaic], tmpA, tmpB, params);
-		params.mBlurDir = 0;
-		DispatchPass(encoder, pipelines.p[kKernelBlur], tmpB, tmpA, params);
-		params.mBlurDir = 1;
-		DispatchPass(encoder, pipelines.p[kKernelBlur], tmpA, dstBuffer, params);
-	}
-	else
-	{
-		if (params.mBlurRadius >= 1)
-		{
-			params.mBlurDir = 0;
-			DispatchPass(encoder, pipelines.p[kKernelBlur], tmpA, tmpB, params);
-			params.mBlurDir = 1;
-			DispatchPass(encoder, pipelines.p[kKernelBlur], tmpB, tmpA, params);
-		}
-		DispatchPass(encoder, pipelines.p[kKernelMosaic], tmpA, dstBuffer, params);
-	}
+	AnonEncodeLayeredPasses(
+		[&](int kernel, id<MTLBuffer> in, id<MTLBuffer> out, id<MTLBuffer> aux,
+			const AnonParamsHost& params) {
+			DispatchPass(encoder, pipelines.p[kernel], in, out, params, aux);
+		},
+		p_Settings, p_Width, p_Height, 0, srcBuffer, p_Width, dstBuffer, p_Width, tmpA, tmpB);
 
 	[encoder endEncoding];
 	[commandBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {

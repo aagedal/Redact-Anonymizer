@@ -1,5 +1,5 @@
 /*
-** Multi-Layer Anonymizer - Metal compute kernels.
+** Redact Anonymizer - Metal compute kernels.
 **
 ** The MSL source is embedded as a string and compiled at runtime with
 ** newLibraryWithSource (same approach as Adobe's SDK_ProcAmp GPU sample).
@@ -43,7 +43,18 @@ struct AnonParams
 	float desaturate;   // 0..1, applied in the final (mosaic) pass
 	int channelOrder;   // 0 RGBA, 1 BGRA, 2 ARGB
 	float cellNoise;    // 0..1 per-cell brightness offset (mosaic pass)
-	float colorNoise;   // 0..1 per-cell, per-channel offset (mosaic pass)
+	float colorNoise;   // 0..1 per-cell, luma-neutral per-channel offset (mosaic pass)
+	uint seed2;         // Smooth Jitter: second pattern, weighted by warpMix2
+	float warpMix;      // weight of seed's pattern (1 without Smooth Jitter)
+	float warpMix2;
+	uint cellSeed;      // still seed for cell/colour noise and frost grain
+	float frostAmount;  // 0..1 lift toward white (frost pass)
+	float frostGrainSize;
+	int blurAlpha;      // blur alpha too (premultiplied fill only)
+	float frostColor0;  // frost target colour, buffer channel order
+	float frostColor1;
+	float frostColor2;
+	float frostColor3;
 };
 
 inline float4 LoadPix(device const uchar* buf, int pitch, int x, int y, int is16f)
@@ -139,6 +150,15 @@ inline float2 AnonDisplacement(float x, float y, float invScale, uint seed)
 	return float2((n0 + n2 * 0.5f) * 0.6666667f, (n1 + n3 * 0.5f) * 0.6666667f);
 }
 
+// Mirrored from AnonAlgo::WarpDisplacement.
+inline float2 AnonWarpDisplacement(float x, float y, float invScale, constant AnonParams& p)
+{
+	float2 n = AnonDisplacement(x, y, invScale, p.seed) * p.warpMix;
+	if (p.warpMix2 > 0.0f)
+		n += AnonDisplacement(x, y, invScale, p.seed2) * p.warpMix2;
+	return n;
+}
+
 // ---- Layer 1: random spatial distortion ----
 
 kernel void AnonDistort(
@@ -159,11 +179,13 @@ kernel void AnonDistort(
 	else
 	{
 		float invScale = 1.0f / max(p.distortScale, 2.0f);
-		float2 n = AnonDisplacement(float(x), float(y), invScale, p.seed);
+		float2 n = AnonWarpDisplacement(float(x), float(y), invScale, p);
 		float dx = (n.x - p.distortBiasDx) * p.distortAmount;
 		float dy = (n.y - p.distortBiasDy) * p.distortAmount;
 		c = SampleBilinear(src, p.srcPitch, p.width, p.height, p.is16f,
 			float2(float(x) + dx, float(y) + dy));
+		int alpha = p.channelOrder == 2 ? 0 : 3;
+		c[alpha] = LoadPix(src, p.srcPitch, x, y, p.is16f)[alpha];
 	}
 	StorePix(dst, p.dstPitch, x, y, p.is16f, c);
 }
@@ -197,7 +219,11 @@ kernel void AnonBlur(
 		acc += LoadPix(src, p.srcPitch, sx, sy, p.is16f) * wgt;
 		sum += wgt;
 	}
-	StorePix(dst, p.dstPitch, x, y, p.is16f, acc / sum);
+	float4 c = acc / sum;
+	int alpha = p.channelOrder == 2 ? 0 : 3;
+	if (!p.blurAlpha)
+		c[alpha] = LoadPix(src, p.srcPitch, x, y, p.is16f)[alpha];
+	StorePix(dst, p.dstPitch, x, y, p.is16f, c);
 }
 
 // ---- Blackout: solid black, source alpha preserved (BGRA -> w is alpha) ----
@@ -291,14 +317,36 @@ inline float AnonColorOffset(int sx, int sy, uint seed, int c, float amount)
 	return (Rand01(sx, sy, seed, 8u + uint(c)) * 2.0f - 1.0f) * amount;
 }
 
-// Mirrored from AnonAlgo::LumaWeights / DesaturatePass.
+// Mirrored from AnonAlgo::LumaWeights.
+inline float4 AnonLumaWeights(int channelOrder)
+{
+	if (channelOrder == 1)
+		return float4(0.0722f, 0.7152f, 0.2126f, 0.0f);
+	if (channelOrder == 2)
+		return float4(0.0f, 0.2126f, 0.7152f, 0.0722f);
+	return float4(0.2126f, 0.7152f, 0.0722f, 0.0f);
+}
+
+// Mirrored from AnonAlgo::ChromaOffsets.
+inline float4 AnonChromaOffsets(int sx, int sy, uint seed, float amount, float4 w, int alpha)
+{
+	float4 o;
+	float luma = 0.0f;
+	for (int i = 0; i < 4; ++i)
+	{
+		o[i] = i == alpha ? 0.0f : AnonColorOffset(sx, sy, seed, i, amount);
+		luma += o[i] * w[i];
+	}
+	for (int i = 0; i < 4; ++i)
+		o[i] = i == alpha ? 0.0f : o[i] - luma;
+	return o;
+}
+
+// Mirrored from AnonAlgo::DesaturatePass.
 inline float4 AnonDesaturate(float4 c, float amount, int channelOrder)
 {
-	float4 w;
-	int alpha;
-	if (channelOrder == 1)      { w = float4(0.0722f, 0.7152f, 0.2126f, 0.0f); alpha = 3; }
-	else if (channelOrder == 2) { w = float4(0.0f, 0.2126f, 0.7152f, 0.0722f); alpha = 0; }
-	else                        { w = float4(0.2126f, 0.7152f, 0.0722f, 0.0f); alpha = 3; }
+	float4 w = AnonLumaWeights(channelOrder);
+	int alpha = channelOrder == 2 ? 0 : 3;
 	float luma = c.x * w.x + c.y * w.y + c.z * w.z + c.w * w.w;
 	float4 r = c + (float4(luma) - c) * amount;
 	r[alpha] = c[alpha];
@@ -329,17 +377,97 @@ kernel void AnonMosaic(
 		sy = clamp(int(RoundHalfUp(c.y)), 0, p.height - 1);
 	}
 	float4 c = LoadPix(src, p.srcPitch, sx, sy, p.is16f);
+	// Each pixel keeps its own alpha (see AnonAlgo::AlphaIndex).
+	int alpha = p.channelOrder == 2 ? 0 : 3;
+	c[alpha] = LoadPix(src, p.srcPitch, x, y, p.is16f)[alpha];
 	if ((p.cellNoise > 0.0f || p.colorNoise > 0.0f) && b > 1)
 	{
-		int alpha = p.channelOrder == 2 ? 0 : 3;
-		float a = c[alpha];
-		float o = AnonCellOffset(sx, sy, p.seed, p.cellNoise);
+		float o = AnonCellOffset(sx, sy, p.cellSeed, p.cellNoise);
+		float4 chroma = AnonChromaOffsets(sx, sy, p.cellSeed, p.colorNoise,
+			AnonLumaWeights(p.channelOrder), alpha);
 		for (int i = 0; i < 4; ++i)
-			c[i] = max(c[i] + o + AnonColorOffset(sx, sy, p.seed, i, p.colorNoise), 0.0f);
-		c[alpha] = a;
+			if (i != alpha)
+				c[i] = max(c[i] + o + chroma[i], 0.0f);
 	}
 	if (p.desaturate > 0.0f)
 		c = AnonDesaturate(c, min(p.desaturate, 1.0f), p.channelOrder);
+	StorePix(dst, p.dstPitch, x, y, p.is16f, c);
+}
+
+// ---- Frosted Glass finish (after the frost blur) ----
+
+// Mirrored from AnonAlgo::FrostGrain (FROST_GRAIN_FLOOR, FROST_GRAIN).
+inline float AnonFrostGrain(int x, int y, float grainSize, uint seed, float amount)
+{
+	int gx = int(floor(float(x) / grainSize));
+	int gy = int(floor(float(y) / grainSize));
+	return (Rand01(gx, gy, seed, 12u) * 2.0f - 1.0f) * (0.015f + 0.03f * amount);
+}
+
+kernel void AnonFrost(
+	device const uchar* src [[buffer(0)]],
+	device uchar* dst [[buffer(1)]],
+	constant AnonParams& p [[buffer(2)]],
+	uint2 gid [[thread_position_in_grid]])
+{
+	if (gid.x >= uint(p.width) || gid.y >= uint(p.height))
+		return;
+	int x = int(gid.x);
+	int y = int(gid.y);
+	float4 c = LoadPix(src, p.srcPitch, x, y, p.is16f);
+	int alpha = p.channelOrder == 2 ? 0 : 3;
+	float a = c[alpha];
+	float g = AnonFrostGrain(x, y, p.frostGrainSize, p.cellSeed, p.frostAmount);
+	float4 target = float4(p.frostColor0, p.frostColor1, p.frostColor2, p.frostColor3);
+	for (int i = 0; i < 4; ++i)
+		c[i] = max(c[i] + (target[i] - c[i]) * p.frostAmount + g, 0.0f);
+	c[alpha] = a;
+	StorePix(dst, p.dstPitch, x, y, p.is16f, c);
+}
+
+// ---- Premultiplied input (mirrored from AnonAlgo::UnpremultiplyPass) ----
+
+kernel void AnonUnpremultiply(
+	device const uchar* src [[buffer(0)]],
+	device uchar* dst [[buffer(1)]],
+	constant AnonParams& p [[buffer(2)]],
+	device const uchar* fill [[buffer(3)]],
+	uint2 gid [[thread_position_in_grid]])
+{
+	if (gid.x >= uint(p.width) || gid.y >= uint(p.height))
+		return;
+	int x = int(gid.x);
+	int y = int(gid.y);
+	float4 c = LoadPix(src, p.srcPitch, x, y, p.is16f);
+	float4 f = LoadPix(fill, p.width, x, y, p.is16f);
+	int alpha = p.channelOrder == 2 ? 0 : 3;
+	float a = c[alpha];
+	float4 r;
+	if (a > 1.0f / 1024.0f)
+		r = c / a;
+	else if (f[alpha] > 1e-6f)
+		r = f / f[alpha];
+	else
+		r = float4(0.0f);
+	r[alpha] = a;
+	StorePix(dst, p.dstPitch, x, y, p.is16f, r);
+}
+
+kernel void AnonPremultiply(
+	device const uchar* src [[buffer(0)]],
+	device uchar* dst [[buffer(1)]],
+	constant AnonParams& p [[buffer(2)]],
+	uint2 gid [[thread_position_in_grid]])
+{
+	if (gid.x >= uint(p.width) || gid.y >= uint(p.height))
+		return;
+	int x = int(gid.x);
+	int y = int(gid.y);
+	float4 c = LoadPix(src, p.srcPitch, x, y, p.is16f);
+	int alpha = p.channelOrder == 2 ? 0 : 3;
+	for (int i = 0; i < 4; ++i)
+		if (i != alpha)
+			c[i] *= c[alpha];
 	StorePix(dst, p.dstPitch, x, y, p.is16f, c);
 }
 )MSLSRC";
@@ -371,6 +499,137 @@ typedef struct
 	int mChannelOrder;
 	float mCellNoise;
 	float mColorNoise;
+	uint32_t mSeed2;
+	float mWarpMix;
+	float mWarpMix2;
+	uint32_t mCellSeed;
+	float mFrostAmount;
+	float mFrostGrainSize;
+	int mBlurAlpha;
+	float mFrostColor0;
+	float mFrostColor1;
+	float mFrostColor2;
+	float mFrostColor3;
 } AnonParamsHost;
+
+/*
+** Kernels of the layered pass chain, as AnonEncodeLayeredPasses names them
+** (blackout is a separate single pass).
+*/
+enum
+{
+	ANON_KERNEL_DISTORT = 0,
+	ANON_KERNEL_BLUR,
+	ANON_KERNEL_MOSAIC,
+	ANON_KERNEL_FROST,
+	ANON_KERNEL_UNPREMULTIPLY,
+	ANON_KERNEL_PREMULTIPLY,
+	ANON_KERNEL_LAYER_COUNT
+};
+
+static const char* const kAnonLayerKernelNames[ANON_KERNEL_LAYER_COUNT] =
+	{ "AnonDistort", "AnonBlur", "AnonMosaic", "AnonFrost", "AnonUnpremultiply", "AnonPremultiply" };
+
+#ifdef __cplusplus
+#include "AnonymizerAlgo.h"
+
+/*
+** Encodes the whole layered stack - the same passes as
+** AnonAlgo::RunLayeredPasses - shared by every Metal host. The stages
+** alternate between tmpA and tmpB; the first stage and those marked
+** readsSrc read src (row pitch srcPitch, in pixels) and the last writes dst
+** (dstPitch). src and
+** dst may be the same buffer: src is only read before the last stage.
+** dispatch is called as dispatch(kernel, in, out, aux, params), where aux
+** (bound at index 3) is the previous stage's output; only
+** AnonUnpremultiply reads it.
+*/
+template <typename Buffer, typename Dispatch>
+inline void AnonEncodeLayeredPasses(Dispatch dispatch, const AnonAlgo::LayerSettings& s,
+	int width, int height, int is16f,
+	Buffer src, int srcPitch, Buffer dst, int dstPitch, Buffer tmpA, Buffer tmpB)
+{
+	AnonParamsHost p = {};
+	p.m16f = is16f;
+	p.mWidth = width;
+	p.mHeight = height;
+	p.mMosaicShape = s.mosaicShape;
+	p.mDistortAmount = s.distortAmount;
+	p.mDistortScale = s.distortScale;
+	p.mMosaicSize = s.mosaicSize;
+	p.mSeed = s.warp.seed;
+	p.mSeed2 = s.warp.seed2;
+	p.mWarpMix = s.warp.mix;
+	p.mWarpMix2 = s.warp.mix2;
+	// Zero-mean the displacement field (see AnonAlgo::DisplacementBias).
+	AnonAlgo::DisplacementBias(width, height, s.distortScale, s.warp,
+		&p.mDistortBiasDx, &p.mDistortBiasDy);
+	p.mDesaturate = s.desaturate;
+	p.mChannelOrder = s.channelOrder;
+	p.mCellNoise = s.cellNoise;
+	p.mColorNoise = s.colorNoise;
+	p.mCellSeed = s.cellSeed;
+	p.mFrostAmount = s.frostAmount;
+	p.mFrostGrainSize = s.frostGrainSize;
+	p.mFrostColor0 = s.frostColor[0];
+	p.mFrostColor1 = s.frostColor[1];
+	p.mFrostColor2 = s.frostColor[2];
+	p.mFrostColor3 = s.frostColor[3];
+
+	struct Stage { int kernel; int blurDir; float blurRadius; bool blurAlpha; bool readsSrc; };
+	Stage stages[12];
+	int n = 0;
+	auto addBlur = [&](float radius, bool blurAlpha) {
+		if ((int)ceilf(radius) < 1)
+			return;
+		stages[n] = { ANON_KERNEL_BLUR, 0, radius, blurAlpha, false };
+		stages[n + 1] = { ANON_KERNEL_BLUR, 1, radius, blurAlpha, false };
+		n += 2;
+	};
+	if (s.premultiplied)
+	{
+		addBlur(AnonAlgo::FillRadius(s), true);
+		stages[n++] = { ANON_KERNEL_UNPREMULTIPLY, 0, 0.0f, false, true };
+	}
+	stages[n++] = { ANON_KERNEL_DISTORT, 0, 0.0f, false, false };
+	if (s.blurAfterMosaic)
+	{
+		stages[n++] = { ANON_KERNEL_MOSAIC, 0, 0.0f, false, false };
+		addBlur(s.blurRadius, false);
+	}
+	else
+	{
+		addBlur(s.blurRadius, false);
+		stages[n++] = { ANON_KERNEL_MOSAIC, 0, 0.0f, false, false };
+	}
+	if (s.frostedGlass)
+	{
+		addBlur(s.frostBlurRadius, false);
+		stages[n++] = { ANON_KERNEL_FROST, 0, 0.0f, false, false };
+	}
+	if (s.premultiplied)
+		stages[n++] = { ANON_KERNEL_PREMULTIPLY, 0, 0.0f, false, false };
+
+	Buffer cur = src;
+	bool curIsSrc = true;
+	for (int i = 0; i < n; ++i)
+	{
+		const Stage& st = stages[i];
+		const bool fromSrc = st.readsSrc || curIsSrc;
+		const bool last = i == n - 1;
+		Buffer in = fromSrc ? src : cur;
+		Buffer out = last ? dst : (!curIsSrc && cur == tmpA ? tmpB : tmpA);
+		p.mBlurDir = st.blurDir;
+		p.mBlurRadius = std::min((int)ceilf(st.blurRadius), 512);
+		p.mBlurSigma = std::max(st.blurRadius * 0.5f, 0.1f);
+		p.mBlurAlpha = st.blurAlpha ? 1 : 0;
+		p.mSrcPitch = fromSrc ? srcPitch : width;
+		p.mDstPitch = last ? dstPitch : width;
+		dispatch(st.kernel, in, out, cur, p);
+		cur = out;
+		curIsSrc = false;
+	}
+}
+#endif // __cplusplus
 
 #endif // ANONYMIZER_KERNEL_H

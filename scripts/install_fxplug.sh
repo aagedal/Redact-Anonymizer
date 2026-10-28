@@ -17,6 +17,10 @@ if [ ! -d "$APP" ]; then
 fi
 
 rm -rf "$DEST"
+# The app installed under the pre-2.0 name carries the same plugin IDs.
+if [ -n "$LEGACY_NAME" ]; then
+	rm -rf "/Applications/$LEGACY_NAME.app"
+fi
 cp -R "$APP" "$DEST"
 # Launching the wrapper app once is what actually registers the plugin;
 # pluginkit -a alone is not sufficient.

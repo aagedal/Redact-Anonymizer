@@ -173,12 +173,16 @@
 		<target object="10132" channel="./12" name="Randomize Seed"/>
 		<target object="10132" channel="./11" name="Session Key"/>
 		<target object="10132" channel="./6" name="Temporal Jitter"/>
+		<target object="10132" channel="./18" name="Smooth Jitter"/>
 		<target object="10132" channel="./7" name="Blackout"/>
 		<target object="10132" channel="./8" name="Mosaic Shape"/>
 		<target object="10132" channel="./13" name="Cell Noise"/>
 		<target object="10132" channel="./14" name="Colour Noise"/>
 		<target object="10132" channel="./9" name="Blur After Mosaic"/>
 		<target object="10132" channel="./10" name="Desaturate"/>
+		<target object="10132" channel="./19" name="Frosted Glass"/>
+		<target object="10132" channel="./20" name="Frost Amount"/>
+		<target object="10132" channel="./21" name="Frost Colour"/>
 	</publishSettings>
 	<currentFrame>0 1 1 0</currentFrame>
 	<currentObject>10126</currentObject>
@@ -296,7 +300,7 @@
 			<parameter name="Aperture Width" id="312" flags="12884901906" default="3840" value="3840"/>
 			<parameter name="Aperture Height" id="313" flags="12884901906" default="2160" value="2160"/>
 		</parameter>
-		<filter name="Multi-Layer Anonymizer" id="10132" factoryID="6" pluginUUID="211035B9-C3CF-42E6-B8CB-F9C28DC3B98A" pluginVersion="1" pluginName="Multi-Layer Anonymizer" pluginDynamicParams="0">
+		<filter name="Redact Anonymizer" id="10132" factoryID="6" pluginUUID="211035B9-C3CF-42E6-B8CB-F9C28DC3B98A" pluginVersion="1" pluginName="Redact Anonymizer" pluginDynamicParams="0">
 			<timing in="0 1 1 0" out="1532928 153600 1 0" offset="0 1 1 0"/>
 			<baseFlags>8589934609</baseFlags>
 			<parameter name="Distortion Amount" id="1" flags="12901679120" default="20" value="20"/>
@@ -316,6 +320,14 @@
 			<parameter name="Enable Distortion" id="15" flags="12901679120" default="1" value="1"/>
 			<parameter name="Enable Blur" id="16" flags="12901679120" default="1" value="1"/>
 			<parameter name="Enable Mosaic" id="17" flags="12901679120" default="1" value="1"/>
+			<parameter name="Smooth Jitter" id="18" flags="12901679120" default="1" value="1"/>
+			<parameter name="Frosted Glass" id="19" flags="12901679120" default="0" value="0"/>
+			<parameter name="Frost Amount" id="20" flags="12901679120" default="0.4" value="0.4"/>
+			<parameter name="Frost Colour" id="21" flags="12901679120">
+				<parameter name="Red" id="1" flags="12901679120" default="0.75" value="0.75"/>
+				<parameter name="Green" id="2" flags="12901679120" default="0.75" value="0.75"/>
+				<parameter name="Blue" id="3" flags="12901679120" default="0.75" value="0.75"/>
+			</parameter>
 			<parameter name="Mix" id="10001" flags="12901679104" default="1" value="1"/>
 			<parameter name="Flip" id="10002" flags="12905938976" default="0" value="0"/>
 			<parameter name="Input Points" id="10003" flags="12905938976" default="1" value="1"/>

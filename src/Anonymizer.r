@@ -1,5 +1,5 @@
 /*
-** Multi-Layer Anonymizer - PiPL resource.
+** Redact Anonymizer - PiPL resource.
 **
 ** AE_Effect_Global_OutFlags must match ANONYMIZER_OUT_FLAGS in Anonymizer.h
 ** (PF_OutFlag_NON_PARAM_VARY = 0x00000004).
@@ -17,7 +17,7 @@
 /* Branding macros are injected by the build (see ANON_EDITION in
 ** CMakeLists.txt); the fallbacks are the open-source edition. */
 #ifndef ANON_PIPL_NAME
-	#define ANON_PIPL_NAME "Multi-Layer Anonymizer"
+	#define ANON_PIPL_NAME "Redact Anonymizer"
 #endif
 #ifndef ANON_PIPL_CATEGORY
 	#define ANON_PIPL_CATEGORY "Aagedal"

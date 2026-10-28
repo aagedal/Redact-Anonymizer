@@ -1,5 +1,5 @@
 /*
-** Multi-Layer Anonymizer for Adobe Premiere Pro
+** Redact Anonymizer for Adobe Premiere Pro
 **
 ** A single effect that stacks three obfuscation layers so the result can not
 ** be undone by deconvolution / mosaic-reversal tools:
@@ -33,7 +33,7 @@
 */
 /* Normally injected by CMake (edition branding); these are the OSS defaults. */
 #ifndef ANONYMIZER_NAME
-#define ANONYMIZER_NAME       "Multi-Layer Anonymizer"
+#define ANONYMIZER_NAME       "Redact Anonymizer"
 #endif
 #ifndef ANONYMIZER_MATCH_NAME
 #define ANONYMIZER_MATCH_NAME "AGDL Multi-Layer Anonymizer"
@@ -67,6 +67,10 @@ enum
 	ANON_ENABLE_DISTORT,
 	ANON_ENABLE_BLUR,
 	ANON_ENABLE_MOSAIC,
+	ANON_SMOOTH_JITTER,
+	ANON_FROSTED_GLASS,
+	ANON_FROST_AMOUNT,
+	ANON_FROST_COLOR,
 	ANON_NUM_PARAMS
 };
 

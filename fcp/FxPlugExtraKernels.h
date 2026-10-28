@@ -1,5 +1,5 @@
 /*
-** Multi-Layer Anonymizer FxPlug - extra Metal functions.
+** Redact Anonymizer FxPlug - extra Metal functions.
 **
 ** Appended to the shared kernel string (shared/AnonymizerKernel.h) at
 ** runtime. FxPlug hands us IOSurface-backed textures, so the pipeline is:

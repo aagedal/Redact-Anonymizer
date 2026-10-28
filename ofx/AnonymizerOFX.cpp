@@ -1,5 +1,5 @@
 /*
-** Multi-Layer Anonymizer - OpenFX plugin for DaVinci Resolve (and other OFX
+** Redact Anonymizer - OpenFX plugin for DaVinci Resolve (and other OFX
 ** hosts). Same algorithm as the Premiere Pro plugin: value-noise distortion
 ** -> Gaussian blur -> mosaic, plus a Blackout override.
 **
@@ -23,7 +23,7 @@
 /* Branding macros are injected by the build (see ANON_EDITION in
 ** CMakeLists.txt); the fallbacks are the open-source edition. */
 #ifndef ANON_EFFECT_NAME
-#define ANON_EFFECT_NAME "Multi-Layer Anonymizer"
+#define ANON_EFFECT_NAME "Redact Anonymizer"
 #endif
 #ifndef ANON_CATEGORY
 #define ANON_CATEGORY "Aagedal"
@@ -38,7 +38,8 @@
 	"Anonymizes a region with three stacked layers - random distortion, " \
 	"Gaussian blur and mosaic - so the result cannot be reversed by " \
 	"deblurring or mosaic-reconstruction tools. Desaturate optionally " \
-	"removes colour; Blackout replaces the stack with solid black."
+	"removes colour; Frosted Glass softens the result into a frosted-glass " \
+	"look; Blackout replaces the stack with solid black."
 #define kPluginIdentifier ANON_OFX_PLUGIN_ID
 #define kPluginVersionMajor MAJOR_VERSION
 #define kPluginVersionMinor MINOR_VERSION
@@ -46,22 +47,6 @@
 #define kSupportsTiles false
 #define kSupportsMultiResolution false
 #define kSupportsMultipleClipPARs false
-
-// Must match AnonRenderSettings in AnonymizerOFXMetal.mm.
-struct AnonRenderSettings
-{
-	float distortAmount;
-	float distortScale;
-	float blurRadius;
-	float mosaicSize;
-	uint32_t seed;
-	bool blackout;
-	int mosaicShape;
-	bool blurAfterMosaic;
-	float desaturate; // 0..1
-	float cellNoise; // 0..1
-	float colorNoise; // 0..1
-};
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -78,13 +63,18 @@ public:
 	virtual void multiThreadProcessImages(OfxRectI p_ProcWindow);
 
 	void setSrcImg(OFX::Image* p_SrcImg) { _srcImg = p_SrcImg; }
-	void setSettings(const AnonRenderSettings& p_Settings) { _settings = p_Settings; }
+	void setSettings(const AnonAlgo::LayerSettings& p_Settings, bool p_Blackout)
+	{
+		_settings = p_Settings;
+		_blackout = p_Blackout;
+	}
 
 private:
 	void computeFullCPU();
 
 	OFX::Image* _srcImg;
-	AnonRenderSettings _settings;
+	AnonAlgo::LayerSettings _settings;
+	bool _blackout = false;
 
 	// CPU path: the layered passes need the whole frame, so the full result
 	// is computed once and the per-thread windows just copy from it.
@@ -94,7 +84,7 @@ private:
 
 #ifdef __APPLE__
 extern void RunMetalAnonymizer(void* p_CmdQ, int p_Width, int p_Height,
-	const float* p_Input, float* p_Output, const AnonRenderSettings& p_Settings);
+	const float* p_Input, float* p_Output, const AnonAlgo::LayerSettings& p_Settings, bool p_Blackout);
 #endif
 
 void AnonymizerProcessor::processImagesMetal()
@@ -107,7 +97,7 @@ void AnonymizerProcessor::processImagesMetal()
 	const float* input = static_cast<const float*>(_srcImg->getPixelData());
 	float* output = static_cast<float*>(_dstImg->getPixelData());
 
-	RunMetalAnonymizer(_pMetalCmdQ, width, height, input, output, _settings);
+	RunMetalAnonymizer(_pMetalCmdQ, width, height, input, output, _settings, _blackout);
 #endif
 }
 
@@ -143,7 +133,7 @@ void AnonymizerProcessor::computeFullCPU()
 		}
 	}
 
-	if (_settings.blackout)
+	if (_blackout)
 	{
 		// RGBA: zero RGB, keep alpha.
 		for (size_t i = 0; i < _cpuResult.size(); i += 4)
@@ -152,11 +142,7 @@ void AnonymizerProcessor::computeFullCPU()
 	}
 
 	std::vector<float> scratch((size_t)w * h * 4);
-	AnonAlgo::RunLayeredPasses(_cpuResult.data(), scratch.data(), w, h,
-		_settings.distortAmount, _settings.distortScale,
-		_settings.blurRadius, _settings.mosaicSize, _settings.mosaicShape,
-		_settings.seed, _settings.blurAfterMosaic, _settings.desaturate, ANON_ORDER_RGBA,
-		_settings.cellNoise, _settings.colorNoise);
+	AnonAlgo::RunLayeredPasses(_cpuResult.data(), scratch.data(), w, h, _settings);
 }
 
 void AnonymizerProcessor::multiThreadProcessImages(OfxRectI p_ProcWindow)
@@ -205,6 +191,10 @@ public:
 		m_EnableBlur = fetchBooleanParam("enableBlur");
 		m_EnableMosaic = fetchBooleanParam("enableMosaic");
 		m_SessionKey = fetchBooleanParam("sessionKey");
+		m_SmoothJitter = fetchBooleanParam("smoothJitter");
+		m_FrostedGlass = fetchBooleanParam("frostedGlass");
+		m_FrostAmount = fetchDoubleParam("frostAmount");
+		m_FrostColor = fetchRGBParam("frostColor");
 	}
 
 	virtual void render(const OFX::RenderArguments& p_Args)
@@ -259,44 +249,46 @@ public:
 			OFX::throwSuiteStatusException(kOfxStatErrValue);
 		}
 
+		const double t = p_Args.time;
+		AnonAlgo::UserParams user;
+		user.distortAmount = m_DistortAmount->getValueAtTime(t);
+		user.distortScale = m_DistortScale->getValueAtTime(t);
+		user.blurRadius = m_BlurRadius->getValueAtTime(t);
+		user.mosaicSize = m_MosaicSize->getValueAtTime(t);
+		user.enableDistort = m_EnableDistort->getValueAtTime(t);
+		user.enableBlur = m_EnableBlur->getValueAtTime(t);
+		user.enableMosaic = m_EnableMosaic->getValueAtTime(t);
+		m_MosaicShape->getValueAtTime(t, user.mosaicShape);
+		user.blurAfterMosaic = m_BlurAfterMosaic->getValueAtTime(t);
+		user.desaturate = m_Desaturate->getValueAtTime(t);
+		user.cellNoise = m_CellNoise->getValueAtTime(t);
+		user.colorNoise = m_ColorNoise->getValueAtTime(t);
+		user.frostedGlass = m_FrostedGlass->getValueAtTime(t);
+		user.frostAmount = m_FrostAmount->getValueAtTime(t);
+		m_FrostColor->getValueAtTime(t, user.frostColor[0], user.frostColor[1], user.frostColor[2]);
+
+		// OFX time is in frames.
+		const int32_t frame = (int32_t)(t + 0.5);
+		const double seedParam = (double)m_Seed->getValueAtTime(t);
+		const uint32_t key = m_SessionKey->getValueAtTime(t) ? AnonAlgo::SessionKey() : 0u;
+		const AnonAlgo::Warp warp = AnonAlgo::ComputeWarp(seedParam,
+			m_TemporalJitter->getValueAtTime(t), m_SmoothJitter->getValueAtTime(t), frame, key);
+
 		// Pixel-space parameters are relative to 1080p; the shorter frame
 		// dimension reflects proxy/preview scaling and is orientation-invariant
 		// (portrait vs landscape timelines).
 		const OfxRectI dstBounds = dst->getBounds();
-		const float ds = AnonResolutionScale(dstBounds.x2 - dstBounds.x1, dstBounds.y2 - dstBounds.y1);
-
-		AnonRenderSettings settings = {};
-		const double t = p_Args.time;
-		settings.distortAmount = AnonAlgo::LayerStrength(m_DistortAmount->getValueAtTime(t),
-			DISTORT_AMOUNT_MIN, m_EnableDistort->getValueAtTime(t), ds, 0.0f);
-		settings.distortScale = std::max((float)m_DistortScale->getValueAtTime(t) * ds, 2.0f);
-		settings.blurRadius = AnonAlgo::LayerStrength(m_BlurRadius->getValueAtTime(t),
-			BLUR_RADIUS_MIN, m_EnableBlur->getValueAtTime(t), ds, 0.0f);
-		// 1 px blocks disable the mosaic pass (and with it the cell/colour noise).
-		settings.mosaicSize = AnonAlgo::LayerStrength(m_MosaicSize->getValueAtTime(t),
-			MOSAIC_SIZE_MIN, m_EnableMosaic->getValueAtTime(t), ds, 1.0f);
-		settings.blackout = m_Blackout->getValueAtTime(p_Args.time);
-		settings.blurAfterMosaic = m_BlurAfterMosaic->getValueAtTime(p_Args.time);
-		int shape = ANON_SHAPE_SQUARE;
-		m_MosaicShape->getValueAtTime(p_Args.time, shape);
-		settings.mosaicShape = (shape >= ANON_SHAPE_SQUARE && shape <= ANON_SHAPE_HEXAGON)
-			? shape : ANON_SHAPE_SQUARE;
-
-		// OFX time is in frames.
-		const bool jitter = m_TemporalJitter->getValueAtTime(p_Args.time);
-		const int32_t frame = (int32_t)(p_Args.time + 0.5);
-		const bool sessionKey = m_SessionKey->getValueAtTime(p_Args.time);
-		settings.seed = AnonComputeSeed((double)m_Seed->getValueAtTime(p_Args.time), jitter, frame,
-			sessionKey ? AnonAlgo::SessionKey() : 0u);
-		settings.desaturate = (float)(m_Desaturate->getValueAtTime(p_Args.time) / 100.0);
-		settings.cellNoise = (float)(m_CellNoise->getValueAtTime(p_Args.time) / 100.0);
-		settings.colorNoise = (float)(m_ColorNoise->getValueAtTime(p_Args.time) / 100.0);
+		AnonAlgo::LayerSettings settings = AnonAlgo::MakeLayerSettings(user,
+			AnonResolutionScale(dstBounds.x2 - dstBounds.x1, dstBounds.y2 - dstBounds.y1),
+			warp, AnonAlgo::ComputeCellSeed(seedParam, key), ANON_ORDER_RGBA);
+		// Resolve hands a power window over as premultiplied alpha.
+		settings.premultiplied = src->getPreMultiplication() == OFX::eImagePreMultiplied;
 
 		p_Processor.setDstImg(dst.get());
 		p_Processor.setSrcImg(src.get());
 		p_Processor.setGPURenderArgs(p_Args);
 		p_Processor.setRenderWindow(p_Args.renderWindow);
-		p_Processor.setSettings(settings);
+		p_Processor.setSettings(settings, m_Blackout->getValueAtTime(t));
 		p_Processor.process();
 	}
 
@@ -319,6 +311,10 @@ public:
 	OFX::BooleanParam* m_EnableBlur;
 	OFX::BooleanParam* m_EnableMosaic;
 	OFX::BooleanParam* m_SessionKey;
+	OFX::BooleanParam* m_SmoothJitter;
+	OFX::BooleanParam* m_FrostedGlass;
+	OFX::DoubleParam* m_FrostAmount;
+	OFX::RGBParam* m_FrostColor;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -422,6 +418,13 @@ public:
 		jitter->setDefault(true);
 		page->addChild(*jitter);
 
+		BooleanParamDescriptor* smooth = p_Desc.defineBooleanParam("smoothJitter");
+		smooth->setLabels("Smooth Jitter", "Smooth Jitter", "Smooth Jitter");
+		smooth->setHint("With Temporal Jitter: let the distortion pattern flow smoothly from "
+			"frame to frame instead of changing abruptly, for a calmer look");
+		smooth->setDefault(true);
+		page->addChild(*smooth);
+
 		BooleanParamDescriptor* blackout = p_Desc.defineBooleanParam("blackout");
 		blackout->setLabels("Blackout", "Blackout", "Blackout");
 		blackout->setHint("Solid black instead of the distort/blur/mosaic stack (alpha preserved)");
@@ -453,6 +456,22 @@ public:
 			"Remove colour from the anonymized region, in percent",
 			DESATURATE_MIN, DESATURATE_MAX, DESATURATE_DFLT);
 		page->addChild(*desat);
+
+		BooleanParamDescriptor* frost = p_Desc.defineBooleanParam("frostedGlass");
+		frost->setLabels("Frosted Glass", "Frosted Glass", "Frosted Glass");
+		frost->setHint("Finish the anonymized result as frosted glass: softened, lightened and "
+			"grained. Changes only the look - the layers above do the anonymizing");
+		frost->setDefault(false);
+		page->addChild(*frost);
+		page->addChild(*defineDouble(p_Desc, "frostAmount", "Frost Amount",
+			"How far Frosted Glass lifts the region toward the Frost Colour, in percent",
+			FROST_AMOUNT_MIN, FROST_AMOUNT_MAX, FROST_AMOUNT_DFLT));
+
+		RGBParamDescriptor* frostColor = p_Desc.defineRGBParam("frostColor");
+		frostColor->setLabels("Frost Colour", "Frost Colour", "Frost Colour");
+		frostColor->setHint("Colour the Frosted Glass finish tints the region toward");
+		frostColor->setDefault(FROST_COLOR_DFLT, FROST_COLOR_DFLT, FROST_COLOR_DFLT);
+		page->addChild(*frostColor);
 	}
 
 	virtual ImageEffect* createInstance(OfxImageEffectHandle p_Handle, ContextEnum /*p_Context*/)

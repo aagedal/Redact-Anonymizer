@@ -54,6 +54,8 @@ done
 # Wrapper app
 cp "$APP_BIN" "$APP/Contents/MacOS/$APP_NAME"
 cp "$BUILD/fcp-plists/Info-App.plist" "$APP/Contents/Info.plist"
+mkdir -p "$APP/Contents/Resources"
+cp "$SRC/fcp/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 # Bundle the Motion templates for this edition; the app installs them into
 # the user's ~/Movies/Motion Templates on first launch (FCP only shows

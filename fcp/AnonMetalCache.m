@@ -1,5 +1,5 @@
 /*
-** Multi-Layer Anonymizer FxPlug - per-device Metal pipeline cache.
+** Redact Anonymizer FxPlug - per-device Metal pipeline cache.
 **
 ** Compiles the shared kernel source (plus the FxPlug-specific copy-in and
 ** output shaders) once per Metal device, and caches compute/render pipeline
@@ -16,6 +16,7 @@
 	NSMutableDictionary<NSNumber*, id<MTLRenderPipelineState>>* _renderPipelines;
 	id<MTLLibrary> _library;
 	NSLock* _lock;
+	id<MTLComputePipelineState> _layerPipelines[ANON_KERNEL_LAYER_COUNT];
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -43,14 +44,22 @@
 	}
 
 	self.psoCopyIn = [self computePipeline:@"AnonCopyIn"];
-	self.psoDistort = [self computePipeline:@"AnonDistort"];
-	self.psoBlur = [self computePipeline:@"AnonBlur"];
-	self.psoMosaic = [self computePipeline:@"AnonMosaic"];
 	self.psoBlackout = [self computePipeline:@"AnonBlackout"];
-	if (!self.psoCopyIn || !self.psoDistort || !self.psoBlur || !self.psoMosaic || !self.psoBlackout)
+	if (!self.psoCopyIn || !self.psoBlackout)
 		return nil;
+	for (int k = 0; k < ANON_KERNEL_LAYER_COUNT; ++k)
+	{
+		_layerPipelines[k] = [self computePipeline:@(kAnonLayerKernelNames[k])];
+		if (_layerPipelines[k] == nil)
+			return nil;
+	}
 
 	return self;
+}
+
+- (id<MTLComputePipelineState>)layerPipeline:(int)kernel
+{
+	return _layerPipelines[kernel];
 }
 
 - (id<MTLComputePipelineState>)computePipeline:(NSString*)name

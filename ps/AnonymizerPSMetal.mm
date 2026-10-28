@@ -1,5 +1,5 @@
 /*
-** Multi-Layer Anonymizer - Photoshop filter plugin (Metal render path).
+** Redact Anonymizer - Photoshop filter plugin (Metal render path).
 **
 ** Runs the full-resolution render on the GPU with the exact MSL kernels
 ** shared with the Premiere / Resolve / FCP plugins. Unlike those hosts,
@@ -19,13 +19,9 @@
 #include <algorithm>
 #include <string.h>
 
-enum { kKernelDistort = 0, kKernelBlur, kKernelMosaic, kKernelCount };
-static const char* const kKernelNames[kKernelCount] =
-	{ "AnonDistort", "AnonBlur", "AnonMosaic" };
-
 static id<MTLDevice> sDevice = nil;
 static id<MTLCommandQueue> sQueue = nil;
-static id<MTLComputePipelineState> sPipelines[kKernelCount] = {};
+static id<MTLComputePipelineState> sPipelines[ANON_KERNEL_LAYER_COUNT] = {};
 static bool sInitTried = false;
 static bool sInitOK = false;
 
@@ -51,10 +47,10 @@ static bool EnsurePipelines(void)
 	if (library == nil)
 		return false;
 
-	for (int k = 0; k < kKernelCount; ++k)
+	for (int k = 0; k < ANON_KERNEL_LAYER_COUNT; ++k)
 	{
 		id<MTLFunction> function = [library newFunctionWithName:
-			[NSString stringWithUTF8String:kKernelNames[k]]];
+			[NSString stringWithUTF8String:kAnonLayerKernelNames[k]]];
 		if (function == nil)
 			return false;
 		sPipelines[k] = [sDevice newComputePipelineStateWithFunction:function error:&err];
@@ -71,12 +67,14 @@ static void DispatchPass(
 	id<MTLComputePipelineState> pipeline,
 	id<MTLBuffer> src,
 	id<MTLBuffer> dst,
-	const AnonParamsHost& params)
+	const AnonParamsHost& params,
+	id<MTLBuffer> aux = nil)
 {
 	[encoder setComputePipelineState:pipeline];
 	[encoder setBuffer:src offset:0 atIndex:0];
 	[encoder setBuffer:dst offset:0 atIndex:1];
 	[encoder setBytes:&params length:sizeof(params) atIndex:2];
+	[encoder setBuffer:(aux ? aux : src) offset:0 atIndex:3];
 	MTLSize threadsPerGroup = {16, 16, 1};
 	MTLSize numThreadgroups = {
 		(NSUInteger)((params.mWidth + 15) / 16),
@@ -85,10 +83,7 @@ static void DispatchPass(
 	[encoder dispatchThreadgroups:numThreadgroups threadsPerThreadgroup:threadsPerGroup];
 }
 
-bool RunMetalPasses(float* buf, int w, int h,
-	float amount, float scale, float blurRadius, float mosaicSize,
-	int mosaicShape, uint32_t seed, bool blurAfterMosaic, float desaturate,
-	float cellNoise, float colorNoise)
+bool RunMetalPasses(float* buf, int w, int h, const AnonAlgo::LayerSettings& settings)
 {
 	@autoreleasepool
 	{
@@ -107,51 +102,16 @@ bool RunMetalPasses(float* buf, int w, int h,
 		if (src == nil || dst == nil || tmpA == nil || tmpB == nil)
 			return false;
 
-		AnonParamsHost params = {};
-		params.mSrcPitch = w;
-		params.mDstPitch = w;
-		params.m16f = 0;
-		params.mWidth = w;
-		params.mHeight = h;
-		params.mDistortAmount = amount;
-		params.mDistortScale = scale;
-		params.mBlurRadius = std::min((int)ceilf(blurRadius), 512);
-		params.mBlurSigma = std::max(blurRadius * 0.5f, 0.1f);
-		params.mMosaicSize = mosaicSize;
-		params.mMosaicShape = mosaicShape;
-		params.mSeed = seed;
-		AnonAlgo::DisplacementBias(w, h, scale, seed,
-			&params.mDistortBiasDx, &params.mDistortBiasDy);
-		params.mDesaturate = desaturate;
-		params.mChannelOrder = ANON_ORDER_RGBA;
-		params.mCellNoise = cellNoise;
-		params.mColorNoise = colorNoise;
-
 		id<MTLCommandBuffer> commandBuffer = [sQueue commandBuffer];
 		commandBuffer.label = @"MultiLayerAnonymizerPS";
 		id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
 
-		/* Distortion, then blur/mosaic in the selected order; result in dst. */
-		DispatchPass(encoder, sPipelines[kKernelDistort], src, tmpA, params);
-		if (blurAfterMosaic && params.mBlurRadius >= 1)
-		{
-			DispatchPass(encoder, sPipelines[kKernelMosaic], tmpA, tmpB, params);
-			params.mBlurDir = 0;
-			DispatchPass(encoder, sPipelines[kKernelBlur], tmpB, tmpA, params);
-			params.mBlurDir = 1;
-			DispatchPass(encoder, sPipelines[kKernelBlur], tmpA, dst, params);
-		}
-		else
-		{
-			if (params.mBlurRadius >= 1)
-			{
-				params.mBlurDir = 0;
-				DispatchPass(encoder, sPipelines[kKernelBlur], tmpA, tmpB, params);
-				params.mBlurDir = 1;
-				DispatchPass(encoder, sPipelines[kKernelBlur], tmpB, tmpA, params);
-			}
-			DispatchPass(encoder, sPipelines[kKernelMosaic], tmpA, dst, params);
-		}
+		AnonEncodeLayeredPasses(
+			[&](int kernel, id<MTLBuffer> in, id<MTLBuffer> out, id<MTLBuffer> aux,
+			const AnonParamsHost& params) {
+				DispatchPass(encoder, sPipelines[kernel], in, out, params, aux);
+			},
+			settings, w, h, 0, src, w, dst, w, tmpA, tmpB);
 
 		[encoder endEncoding];
 		[commandBuffer commit];

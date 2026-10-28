@@ -1,12 +1,12 @@
 /*
-** Multi-Layer Anonymizer - Photoshop filter plugin (host glue).
+** Redact Anonymizer - Photoshop filter plugin (host glue).
 **
 ** Selector flow follows the SDK's Dissolve sample: Parameters -> Prepare ->
 ** Start -> Finish, with all pixel work done from Start via advanceState().
 **
 ** The filtered region is gathered band-by-band into one packed RGBA float
 ** buffer, run through the shared pass pipeline (distort -> blur -> mosaic
-** -> desaturate, or blackout), and written back band-by-band. Every run
+** -> desaturate -> optional frost, or blackout), and written back band-by-band. Every run
 ** draws a fresh random seed, so no two applications share a pattern and
 ** the pattern is recorded nowhere. Photoshop itself blends the
 ** result through any selection mask, so maskData is never touched here.
@@ -124,6 +124,9 @@ static void InitParameters(PSParameters* p)
 	p->enableDistort = 1;
 	p->enableBlur = 1;
 	p->enableMosaic = 1;
+	p->frostedGlass = 0;
+	p->frostAmount = FROST_AMOUNT_DFLT;
+	p->frostColor[0] = p->frostColor[1] = p->frostColor[2] = FROST_COLOR_DFLT;
 }
 
 /*
@@ -352,24 +355,9 @@ static void DoFilterImpl(uint32_t seed)
 	** is the same whether the filter runs on a selection or the whole image.
 	*/
 	const VPoint imageSize = GetImageSize();
-	const float ds = AnonResolutionScale((int)imageSize.h, (int)imageSize.v);
-
-	const float amount = AnonAlgo::LayerStrength(gParams->distortAmount, DISTORT_AMOUNT_MIN,
-		gParams->enableDistort != 0, ds, 0.0f);
-	const float scale = std::max((float)gParams->distortScale * ds, 2.0f);
-	const float blurRadius = std::min(AnonAlgo::LayerStrength(gParams->blurRadius, BLUR_RADIUS_MIN,
-		gParams->enableBlur != 0, ds, 0.0f), 512.0f);
-	/* 1 px blocks disable the mosaic pass (and with it the cell/colour noise). */
-	const float mosaicSize = std::max(AnonAlgo::LayerStrength(gParams->mosaicSize, MOSAIC_SIZE_MIN,
-		gParams->enableMosaic != 0, ds, 1.0f), 1.0f);
-	int mosaicShape = (int)gParams->mosaicShape;
-	if (mosaicShape < ANON_SHAPE_SQUARE || mosaicShape > ANON_SHAPE_HEXAGON)
-		mosaicShape = ANON_SHAPE_SQUARE;
-	/* Grayscale has no colour to remove. */
-	const float desaturate = IsGrayMode(gFilterRecord->imageMode)
-		? 0.0f : (float)(gParams->desaturate / 100.0);
-	const float cellNoise = (float)(gParams->cellNoise / 100.0);
-	const float colorNoise = (float)(gParams->colorNoise / 100.0);
+	const AnonAlgo::LayerSettings settings = PSLayerSettings(*gParams,
+		AnonResolutionScale((int)imageSize.h, (int)imageSize.v), seed,
+		IsGrayMode(gFilterRecord->imageMode));
 
 	float* buf = (float*)malloc((size_t)w * h * 4 * sizeof(float));
 	float* scratch = NULL; /* allocated only if the CPU fallback runs */
@@ -438,9 +426,7 @@ static void DoFilterImpl(uint32_t seed)
 			for (int c = 0; c < colorPlanes; ++c)
 				buf[i * 4 + c] = 0.0f;
 	}
-	else if (!RunMetalPasses(buf, (int)w, (int)h,
-				amount, scale, blurRadius, mosaicSize, mosaicShape, seed,
-				gParams->blurAfterMosaic != 0, desaturate, cellNoise, colorNoise))
+	else if (!RunMetalPasses(buf, (int)w, (int)h, settings))
 	{
 		scratch = (float*)malloc((size_t)w * h * 4 * sizeof(float));
 		if (scratch == NULL)
@@ -448,9 +434,7 @@ static void DoFilterImpl(uint32_t seed)
 			*gResult = memFullErr;
 			goto cleanup;
 		}
-		AnonAlgo::RunLayeredPasses(buf, scratch, (int)w, (int)h,
-			amount, scale, blurRadius, mosaicSize, mosaicShape, seed,
-			gParams->blurAfterMosaic != 0, desaturate, ANON_ORDER_RGBA, cellNoise, colorNoise);
+		AnonAlgo::RunLayeredPasses(buf, scratch, (int)w, (int)h, settings);
 	}
 
 	/* Write the result back band by band. */
