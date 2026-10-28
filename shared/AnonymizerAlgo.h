@@ -668,6 +668,10 @@ inline void DesaturatePass(float* buf, int w, int h, float amount, int channelOr
 */
 #define FROST_GRAIN       0.03f
 #define FROST_GRAIN_FLOOR 0.015f
+/* Frost blur radius in mosaic cells. Wider than one cell, so it removes the
+** cell-scale structure too: a blur that only melts the cell edges brings a
+** blocked face back into view (the Harmon effect) and looks reversible. */
+#define FROST_BLUR_CELLS  1.75f
 
 // Frost grain value for pixel (x, y), in [-1, 1] times the grain strength.
 // Keep in sync with AnonFrostGrain in the MSL.
@@ -776,8 +780,9 @@ inline LayerSettings MakeLayerSettings(const UserParams& u, float ds, const Warp
 	const float* color = channelOrder == ANON_ORDER_BGRA ? bgraOrder
 		: channelOrder == ANON_ORDER_ARGB ? argbOrder : rgbaOrder;
 	std::copy(color, color + 4, s.frostColor);
-	// Wide enough to melt the mosaic cells into each other.
-	s.frostBlurRadius = std::min(std::max(s.mosaicSize, (float)MOSAIC_SIZE_DFLT * ds), 512.0f);
+	// Wider than a cell: melts the cells and the face-scale shapes they form.
+	s.frostBlurRadius = std::min(FROST_BLUR_CELLS
+		* std::max(s.mosaicSize, (float)MOSAIC_SIZE_DFLT * ds), 512.0f);
 	s.frostGrainSize = std::max(roundf(1.5f * ds), 1.0f);
 	s.channelOrder = channelOrder;
 	s.warp = warp;
