@@ -125,8 +125,11 @@ weights chosen so the distortion strength stays constant. The warp still never r
 stays fixed across the clip, but neighbouring frames now share most of their
 pattern, so it reads as gently flowing glass rather than flicker.
 
-Frosted Glass: the finish blurs the anonymized result again (wide enough to
-melt the mosaic cells), lifts it toward the Frost Colour (75 % grey by default) by Frost
+Frosted Glass: the finish blurs the anonymized result again, with a radius
+of 1.75 mosaic cells. A blur that only melted the cell edges would let a
+close-up face read as merely out of focus (blocked images become easier to
+recognize once their edges are softened), so it also smooths away the
+cell-scale shapes. It then lifts it toward the Frost Colour (75 % grey by default) by Frost
 Amount and adds a
 fine grain that stays still. Because it only ever sees the output of the
 distortion/blur/mosaic stack, it cannot reveal anything those layers
