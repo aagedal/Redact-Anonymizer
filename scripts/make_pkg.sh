@@ -186,9 +186,14 @@ FCP_PKGREF=""
 if [ -d "$FCP_APP" ]; then
 	FCP_SCRIPTS="$PKGROOT/scripts-fcp"
 	mkdir -p "$FCP_SCRIPTS"
+	# Also removes the app installed under the pre-2.0 name (LEGACY_NAME),
+	# which carries the same plugin IDs.
 	cat > "$FCP_SCRIPTS/preinstall" <<PREINST
 #!/bin/sh
 rm -rf "/Applications/${APP_NAME}.app"
+if [ -n "${LEGACY_NAME}" ]; then
+	rm -rf "/Applications/${LEGACY_NAME}.app"
+fi
 exit 0
 PREINST
 	chmod +x "$FCP_SCRIPTS/preinstall"

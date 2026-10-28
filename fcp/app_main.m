@@ -1,5 +1,5 @@
 /*
-** Multi-Layer Anonymizer FxPlug - wrapper application.
+** Redact Anonymizer FxPlug - wrapper application.
 **
 ** The app carries the FxPlug XPC service in Contents/PlugIns; launching it
 ** once registers the plugin with PluginKit. It also installs the bundled
@@ -14,7 +14,7 @@
 #import <Cocoa/Cocoa.h>
 
 #ifndef ANON_EFFECT_NAME
-#define ANON_EFFECT_NAME "Multi-Layer Anonymizer"
+#define ANON_EFFECT_NAME "Redact Anonymizer"
 #endif
 #ifndef ANON_CATEGORY
 #define ANON_CATEGORY "Aagedal"
@@ -66,12 +66,28 @@ static NSInteger InstallMotionTemplates(NSError** outError)
 	return installed;
 }
 
+#ifdef ANON_LEGACY_NAME
+/*
+** Removes the Motion template installed under the effect's pre-2.0 name,
+** so Final Cut Pro does not list the same effect twice.
+*/
+static void RemoveLegacyMotionTemplate(void)
+{
+	NSString* legacy = [NSHomeDirectory() stringByAppendingPathComponent:
+		@"Movies/Motion Templates.localized/Effects.localized/" ANON_CATEGORY "/" ANON_LEGACY_NAME];
+	[[NSFileManager defaultManager] removeItemAtPath:legacy error:NULL];
+}
+#endif
+
 int main(int argc, const char* argv[])
 {
 	@autoreleasepool
 	{
 		[NSApplication sharedApplication];
 
+#ifdef ANON_LEGACY_NAME
+		RemoveLegacyMotionTemplate();
+#endif
 		NSError* error = nil;
 		NSInteger templates = InstallMotionTemplates(&error);
 

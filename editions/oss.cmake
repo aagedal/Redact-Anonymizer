@@ -1,11 +1,15 @@
 # Open-source edition branding (default).
-set(ANON_EFFECT_NAME "Multi-Layer Anonymizer")
+set(ANON_EFFECT_NAME "Redact Anonymizer")
 set(ANON_CATEGORY "Aagedal")
 set(ANON_MATCH_NAME "AGDL Multi-Layer Anonymizer")
 set(ANON_BUNDLE_BASE "Anonymizer")
-set(ANON_APP_NAME "Multi-Layer Anonymizer")
-set(ANON_PKG_BASENAME "MultiLayerAnonymizer")
-set(ANON_PKG_TITLE "Multi-Layer Anonymizer")
+set(ANON_APP_NAME "Redact Anonymizer")
+set(ANON_PKG_BASENAME "RedactAnonymizer")
+set(ANON_PKG_TITLE "Redact Anonymizer")
+# Name before 2.0. Only the visible names changed: the match name, plugin
+# IDs and UUIDs below are unchanged so saved projects keep working. The
+# installer and the FxPlug app remove the old-named app and Motion template.
+set(ANON_LEGACY_NAME "Multi-Layer Anonymizer")
 set(ANON_ID_PREMIERE "me.aagedal.premiere.anonymizer")
 set(ANON_ID_OFX "me.aagedal.ofx.anonymizer")
 set(ANON_ID_FCP_APP "me.aagedal.fxplug.anonymizer")

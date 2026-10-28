@@ -1,5 +1,5 @@
 /*
-** Multi-Layer Anonymizer - CPU (software) render path and AE-style plugin
+** Redact Anonymizer - CPU (software) render path and AE-style plugin
 ** entry point.
 **
 ** In Premiere Pro this path is used when GPU acceleration is unavailable or
@@ -147,6 +147,26 @@ PF_Err ParamsSetup(
 	PF_ADD_CHECKBOXX("Enable Mosaic",
 		TRUE, 0, ANON_ENABLE_MOSAIC);
 
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_CHECKBOXX("Smooth Jitter",
+		TRUE, 0, ANON_SMOOTH_JITTER);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_CHECKBOXX("Frosted Glass",
+		FALSE, 0, ANON_FROSTED_GLASS);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Frost Amount",
+		FROST_AMOUNT_MIN, FROST_AMOUNT_MAX,
+		FROST_AMOUNT_MIN, FROST_AMOUNT_MAX,
+		FROST_AMOUNT_DFLT, PF_Precision_TENTHS,
+		PF_ValueDisplayFlag_PERCENT, 0, ANON_FROST_AMOUNT);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_COLOR("Frost Colour",
+		(int)(FROST_COLOR_DFLT * 255.0 + 0.5), (int)(FROST_COLOR_DFLT * 255.0 + 0.5),
+		(int)(FROST_COLOR_DFLT * 255.0 + 0.5), ANON_FROST_COLOR);
+
 	out_data->num_params = ANON_NUM_PARAMS;
 	return PF_Err_NONE;
 }
@@ -190,35 +210,34 @@ PF_Err Render(
 	if (w <= 0 || h <= 0)
 		return PF_Err_NONE;
 
-	// Pixel-space parameters are relative to 1080p; scaling by the shorter
-	// frame dimension keeps the anonymization strength constant across
-	// resolutions and orientations (portrait vs landscape timelines).
-	const float ds = AnonResolutionScale(w, h);
-
-	float amount = LayerStrength(params[ANON_DISTORT_AMOUNT]->u.fs_d.value, DISTORT_AMOUNT_MIN,
-		params[ANON_ENABLE_DISTORT]->u.bd.value != 0, ds, 0.0f);
-	float scale = std::max((float)params[ANON_DISTORT_SCALE]->u.fs_d.value * ds, 2.0f);
-	float blurRadius = LayerStrength(params[ANON_BLUR_RADIUS]->u.fs_d.value, BLUR_RADIUS_MIN,
-		params[ANON_ENABLE_BLUR]->u.bd.value != 0, ds, 0.0f);
-	// 1 px blocks disable the mosaic pass (and with it the cell/colour noise).
-	float mosaicSize = LayerStrength(params[ANON_MOSAIC_SIZE]->u.fs_d.value, MOSAIC_SIZE_MIN,
-		params[ANON_ENABLE_MOSAIC]->u.bd.value != 0, ds, 1.0f);
-	double seedParam = params[ANON_SEED]->u.fs_d.value;
-	bool jitter = params[ANON_TEMPORAL_JITTER]->u.bd.value != 0;
+	UserParams user;
+	user.distortAmount = params[ANON_DISTORT_AMOUNT]->u.fs_d.value;
+	user.distortScale = params[ANON_DISTORT_SCALE]->u.fs_d.value;
+	user.blurRadius = params[ANON_BLUR_RADIUS]->u.fs_d.value;
+	user.mosaicSize = params[ANON_MOSAIC_SIZE]->u.fs_d.value;
+	user.enableDistort = params[ANON_ENABLE_DISTORT]->u.bd.value != 0;
+	user.enableBlur = params[ANON_ENABLE_BLUR]->u.bd.value != 0;
+	user.enableMosaic = params[ANON_ENABLE_MOSAIC]->u.bd.value != 0;
 	// Popup values are 1-based.
-	int mosaicShape = params[ANON_MOSAIC_SHAPE]->u.pd.value - 1;
-	if (mosaicShape < ANON_SHAPE_SQUARE || mosaicShape > ANON_SHAPE_HEXAGON)
-		mosaicShape = ANON_SHAPE_SQUARE;
+	user.mosaicShape = params[ANON_MOSAIC_SHAPE]->u.pd.value - 1;
+	user.blurAfterMosaic = params[ANON_BLUR_AFTER_MOSAIC]->u.bd.value != 0;
+	user.desaturate = params[ANON_DESATURATE]->u.fs_d.value;
+	user.cellNoise = params[ANON_CELL_NOISE]->u.fs_d.value;
+	user.colorNoise = params[ANON_COLOR_NOISE]->u.fs_d.value;
+	user.frostedGlass = params[ANON_FROSTED_GLASS]->u.bd.value != 0;
+	user.frostAmount = params[ANON_FROST_AMOUNT]->u.fs_d.value;
+	const PF_Pixel frostColor = params[ANON_FROST_COLOR]->u.cd.value;
+	user.frostColor[0] = frostColor.red / 255.0;
+	user.frostColor[1] = frostColor.green / 255.0;
+	user.frostColor[2] = frostColor.blue / 255.0;
 
 	int32_t frame = 0;
 	if (in_data->time_step != 0)
 		frame = (int32_t)(in_data->current_time / in_data->time_step);
-	const bool sessionKey = params[ANON_SESSION_KEY]->u.bd.value != 0;
-	uint32_t seed = AnonComputeSeed(seedParam, jitter, frame,
-		sessionKey ? SessionKey() : 0u);
-	const float desaturate = (float)params[ANON_DESATURATE]->u.fs_d.value / 100.0f;
-	const float cellNoise = (float)params[ANON_CELL_NOISE]->u.fs_d.value / 100.0f;
-	const float colorNoise = (float)params[ANON_COLOR_NOISE]->u.fs_d.value / 100.0f;
+	const double seedParam = params[ANON_SEED]->u.fs_d.value;
+	const uint32_t key = params[ANON_SESSION_KEY]->u.bd.value != 0 ? SessionKey() : 0u;
+	const Warp warp = ComputeWarp(seedParam, params[ANON_TEMPORAL_JITTER]->u.bd.value != 0,
+		params[ANON_SMOOTH_JITTER]->u.bd.value != 0, frame, key);
 
 	const bool isFloatWorld = (in_data->appl_id == 'PrMr');
 
@@ -281,11 +300,13 @@ PF_Err Render(
 		}
 	}
 
-	// Distortion followed by blur/mosaic in the selected order, then
-	// desaturation. Premiere floats are BGRA, AE 8-bit worlds ARGB. Result in bufA.
-	RunLayeredPasses(bufA.data(), bufB.data(), w, h, amount, scale, blurRadius, mosaicSize, mosaicShape, seed,
-		params[ANON_BLUR_AFTER_MOSAIC]->u.bd.value != 0,
-		desaturate, isFloatWorld ? ANON_ORDER_BGRA : ANON_ORDER_ARGB, cellNoise, colorNoise);
+	// Pixel-space parameters are relative to 1080p; scaling by the shorter
+	// frame dimension keeps the anonymization strength constant across
+	// resolutions and orientations (portrait vs landscape timelines).
+	// Premiere floats are BGRA, AE 8-bit worlds ARGB. Result in bufA.
+	const LayerSettings settings = MakeLayerSettings(user, AnonResolutionScale(w, h), warp,
+		ComputeCellSeed(seedParam, key), isFloatWorld ? ANON_ORDER_BGRA : ANON_ORDER_ARGB);
+	RunLayeredPasses(bufA.data(), bufB.data(), w, h, settings);
 
 	// Store to the output world.
 	if (isFloatWorld)

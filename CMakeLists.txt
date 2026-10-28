@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 # VERSION is the single source of truth — bump here only.
-project(PremiereAnonymizer VERSION 1.8.0 LANGUAGES CXX OBJCXX)
+project(PremiereAnonymizer VERSION 2.0.0 LANGUAGES CXX OBJCXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,7 +20,7 @@ endif()
 
 # ---- Edition branding ----
 # Editions live in editions/<name>.cmake; "oss" (default) is the open-source
-# Multi-Layer Anonymizer. Custom-branded editions define the same variables
+# Redact Anonymizer. Custom-branded editions define the same variables
 # with different names/identifiers - the algorithm is identical, and
 # differently-branded builds can be installed side by side.
 set(ANON_EDITION "oss" CACHE STRING "Branding edition (see editions/*.cmake)")
@@ -52,6 +52,7 @@ ID_FCP_SERVICE=\"${ANON_ID_FCP_SERVICE}\"
 ID_PS=\"${ANON_ID_PS}\"
 CATEGORY=\"${ANON_CATEGORY}\"
 PS_ACTION_NAME=\"${ANON_PS_ACTION_NAME}\"
+LEGACY_NAME=\"${ANON_LEGACY_NAME}\"
 ")
 
 # SDK locations. Default to the vendored copies in sdk/; point these at your
@@ -226,6 +227,10 @@ if(EXISTS "${FXPLUG_FRAMEWORK_DIR}/FxPlug.framework")
 		ANON_EFFECT_NAME="${ANON_EFFECT_NAME}"
 		ANON_CATEGORY="${ANON_CATEGORY}"
 	)
+	if(ANON_LEGACY_NAME)
+		target_compile_definitions(AnonymizerFxPlugApp PRIVATE
+			ANON_LEGACY_NAME="${ANON_LEGACY_NAME}")
+	endif()
 	target_link_libraries(AnonymizerFxPlugApp PRIVATE "-framework Cocoa")
 
 	configure_file(fcp/Info-Service.plist.in "${CMAKE_CURRENT_BINARY_DIR}/fcp-plists/Info-Service.plist" @ONLY)
@@ -247,6 +252,7 @@ if(EXISTS "${FXPLUG_FRAMEWORK_DIR}/FxPlug.framework")
 			AnonymizerFxPlugApp
 			AnonymizerFxPlugService
 			"${CMAKE_CURRENT_SOURCE_DIR}/scripts/assemble_fxplug.sh"
+			"${CMAKE_CURRENT_SOURCE_DIR}/fcp/AppIcon.icns"
 			"${CMAKE_CURRENT_BINARY_DIR}/fcp-plists/Info-Service.plist"
 			"${CMAKE_CURRENT_BINARY_DIR}/fcp-plists/Info-App.plist"
 		COMMENT "Assembling and signing ${ANON_APP_NAME}.app (FxPlug)"

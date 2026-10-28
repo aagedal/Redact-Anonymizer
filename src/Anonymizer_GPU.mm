@@ -1,5 +1,5 @@
 /*
-** Multi-Layer Anonymizer - GPU render path (Metal).
+** Redact Anonymizer - GPU render path (Metal).
 **
 ** Premiere Pro binds this GPU filter to the AE-style effect in the same
 ** binary via the PiPL match name (PrGPUFilterInfo::outMatchName is left null,
@@ -8,6 +8,8 @@
 ** Render pipeline (all on the GPU, no readbacks):
 **   input -> AnonDistort -> tmpA -> AnonBlur(H) -> tmpB -> AnonBlur(V)
 **         -> tmpA -> AnonMosaic -> output
+** (see AnonEncodeLayeredPasses; Blur After Mosaic and Frosted Glass change
+** the stage list).
 */
 
 #include "Anonymizer.h"
@@ -34,6 +36,29 @@ static prSuiteError CheckForMetalError(NSError* inError)
 	return suiteError_NoError;
 }
 
+/*
+** Colour parameters reach GPU filters packed into one integer: 16 bits per
+** channel ARGB in an Int64 (8 bits per channel in an Int32 on older hosts).
+** Compare against the Software Only renderer if the colour looks wrong.
+*/
+static void UnpackColorParam(const PrParam& inParam, double outRGB[3])
+{
+	if (inParam.mType == kPrParamType_Int64)
+	{
+		const uint64_t v = (uint64_t)inParam.mInt64;
+		outRGB[0] = (double)((v >> 32) & 0xFFFF) / 65535.0;
+		outRGB[1] = (double)((v >> 16) & 0xFFFF) / 65535.0;
+		outRGB[2] = (double)(v & 0xFFFF) / 65535.0;
+	}
+	else if (inParam.mType == kPrParamType_Int32)
+	{
+		const uint32_t v = (uint32_t)inParam.mInt32;
+		outRGB[0] = (double)((v >> 16) & 0xFF) / 255.0;
+		outRGB[1] = (double)((v >> 8) & 0xFF) / 255.0;
+		outRGB[2] = (double)(v & 0xFF) / 255.0;
+	}
+}
+
 static size_t DivideRoundUp(size_t inValue, size_t inMultiple)
 {
 	return inValue ? (inValue + inMultiple - 1) / inMultiple : 0;
@@ -50,10 +75,14 @@ struct ScopedAutoreleasePool
 };
 
 enum { kMaxDevices = 12 };
-enum { kKernelDistort = 0, kKernelBlur, kKernelMosaic, kKernelBlackout, kKernelCount };
+// The layered-pass kernels (ANON_KERNEL_*), then blackout.
+enum { kKernelBlackout = ANON_KERNEL_LAYER_COUNT, kKernelCount };
 static id<MTLComputePipelineState> sPipelineCache[kMaxDevices][kKernelCount] = {};
 
-static const char* const kKernelNames[kKernelCount] = { "AnonDistort", "AnonBlur", "AnonMosaic", "AnonBlackout" };
+static const char* KernelName(int k)
+{
+	return k == kKernelBlackout ? "AnonBlackout" : kAnonLayerKernelNames[k];
+}
 
 /*
 **
@@ -100,7 +129,7 @@ public:
 
 		for (int k = 0; k < kKernelCount; ++k)
 		{
-			NSString* name = [NSString stringWithCString:kKernelNames[k] encoding:NSUTF8StringEncoding];
+			NSString* name = [NSString stringWithCString:KernelName(k) encoding:NSUTF8StringEncoding];
 			id<MTLFunction> function = [[library newFunctionWithName:name] autorelease];
 			if (!function)
 				return suiteError_Fail;
@@ -162,45 +191,42 @@ public:
 		// ---- Parameters ----
 		const PrTime clipTime = inRenderParams->inClipTime;
 
-		// Pixel-space parameters are relative to 1080p; the shorter frame
-		// dimension already reflects any preview downsampling and is
-		// orientation-invariant (portrait vs landscape timelines).
-		const float ds = AnonResolutionScale(width, height);
-
-		const float distortAmount = AnonAlgo::LayerStrength(GetParam(ANON_DISTORT_AMOUNT, clipTime).mFloat64,
-			DISTORT_AMOUNT_MIN, GetParam(ANON_ENABLE_DISTORT, clipTime).mBool != 0, ds, 0.0f);
-		const float distortScale = std::max((float)GetParam(ANON_DISTORT_SCALE, clipTime).mFloat64 * ds, 2.0f);
-		const float blurRadius = AnonAlgo::LayerStrength(GetParam(ANON_BLUR_RADIUS, clipTime).mFloat64,
-			BLUR_RADIUS_MIN, GetParam(ANON_ENABLE_BLUR, clipTime).mBool != 0, ds, 0.0f);
-		// 1 px blocks disable the mosaic pass (and with it the cell/colour noise).
-		const float mosaicSize = AnonAlgo::LayerStrength(GetParam(ANON_MOSAIC_SIZE, clipTime).mFloat64,
-			MOSAIC_SIZE_MIN, GetParam(ANON_ENABLE_MOSAIC, clipTime).mBool != 0, ds, 1.0f);
-		const double seedParam = GetParam(ANON_SEED, clipTime).mFloat64;
-		const bool jitter = GetParam(ANON_TEMPORAL_JITTER, clipTime).mBool != 0;
-		const bool blurAfterMosaic = GetParam(ANON_BLUR_AFTER_MOSAIC, clipTime).mBool != 0;
-		const bool blackout = GetParam(ANON_BLACKOUT, clipTime).mBool != 0;
+		AnonAlgo::UserParams user;
+		user.distortAmount = GetParam(ANON_DISTORT_AMOUNT, clipTime).mFloat64;
+		user.distortScale = GetParam(ANON_DISTORT_SCALE, clipTime).mFloat64;
+		user.blurRadius = GetParam(ANON_BLUR_RADIUS, clipTime).mFloat64;
+		user.mosaicSize = GetParam(ANON_MOSAIC_SIZE, clipTime).mFloat64;
+		user.enableDistort = GetParam(ANON_ENABLE_DISTORT, clipTime).mBool != 0;
+		user.enableBlur = GetParam(ANON_ENABLE_BLUR, clipTime).mBool != 0;
+		user.enableMosaic = GetParam(ANON_ENABLE_MOSAIC, clipTime).mBool != 0;
 		// Unlike the AE-style CPU side (u.pd.value, 1-based), the video
 		// segment suite delivers popup values 0-based.
-		int mosaicShape = (int)GetParam(ANON_MOSAIC_SHAPE, clipTime).mInt32;
-		if (mosaicShape < ANON_SHAPE_SQUARE || mosaicShape > ANON_SHAPE_HEXAGON)
-			mosaicShape = ANON_SHAPE_SQUARE;
+		user.mosaicShape = (int)GetParam(ANON_MOSAIC_SHAPE, clipTime).mInt32;
+		user.blurAfterMosaic = GetParam(ANON_BLUR_AFTER_MOSAIC, clipTime).mBool != 0;
+		user.desaturate = GetParam(ANON_DESATURATE, clipTime).mFloat64;
+		user.cellNoise = GetParam(ANON_CELL_NOISE, clipTime).mFloat64;
+		user.colorNoise = GetParam(ANON_COLOR_NOISE, clipTime).mFloat64;
+		user.frostedGlass = GetParam(ANON_FROSTED_GLASS, clipTime).mBool != 0;
+		user.frostAmount = GetParam(ANON_FROST_AMOUNT, clipTime).mFloat64;
+		UnpackColorParam(GetParam(ANON_FROST_COLOR, clipTime), user.frostColor);
+		const bool blackout = GetParam(ANON_BLACKOUT, clipTime).mBool != 0;
 
 		int32_t frame = 0;
 		if (inRenderParams->inRenderTicksPerFrame != 0)
 			frame = (int32_t)(clipTime / inRenderParams->inRenderTicksPerFrame);
-		const bool sessionKey = GetParam(ANON_SESSION_KEY, clipTime).mBool != 0;
-		const uint32_t seed = AnonComputeSeed(seedParam, jitter, frame,
-			sessionKey ? AnonAlgo::SessionKey() : 0u);
-		const float desaturate = (float)GetParam(ANON_DESATURATE, clipTime).mFloat64 / 100.0f;
-		const float cellNoise = (float)GetParam(ANON_CELL_NOISE, clipTime).mFloat64 / 100.0f;
-		const float colorNoise = (float)GetParam(ANON_COLOR_NOISE, clipTime).mFloat64 / 100.0f;
+		const double seedParam = GetParam(ANON_SEED, clipTime).mFloat64;
+		const uint32_t key = GetParam(ANON_SESSION_KEY, clipTime).mBool != 0
+			? AnonAlgo::SessionKey() : 0u;
+		const AnonAlgo::Warp warp = AnonAlgo::ComputeWarp(seedParam,
+			GetParam(ANON_TEMPORAL_JITTER, clipTime).mBool != 0,
+			GetParam(ANON_SMOOTH_JITTER, clipTime).mBool != 0, frame, key);
 
-		// Zero-mean the displacement field (see AnonAlgo::DisplacementBias).
-		float distortBiasDx = 0.0f, distortBiasDy = 0.0f;
-		AnonAlgo::DisplacementBias(width, height, distortScale, seed, &distortBiasDx, &distortBiasDy);
-
-		const int blurRadiusInt = std::min((int)ceilf(blurRadius), 512);
-		const float blurSigma = std::max(blurRadius * 0.5f, 0.1f);
+		// Pixel-space parameters are relative to 1080p; the shorter frame
+		// dimension already reflects any preview downsampling and is
+		// orientation-invariant (portrait vs landscape timelines).
+		const AnonAlgo::LayerSettings settings = AnonAlgo::MakeLayerSettings(user,
+			AnonResolutionScale(width, height), warp, AnonAlgo::ComputeCellSeed(seedParam, key),
+			ANON_ORDER_BGRA);
 
 		// Blackout short-circuits the whole stack: one pass, no temp buffers.
 		if (blackout)
@@ -251,52 +277,12 @@ public:
 			return suiteError_OutOfMemory;
 		}
 
-		AnonParamsHost params = {};
-		params.m16f = is16f;
-		params.mWidth = width;
-		params.mHeight = height;
-		params.mBlurRadius = blurRadiusInt;
-		params.mMosaicShape = mosaicShape;
-		params.mDistortAmount = distortAmount;
-		params.mDistortScale = distortScale;
-		params.mBlurSigma = blurSigma;
-		params.mMosaicSize = mosaicSize;
-		params.mSeed = seed;
-		params.mDistortBiasDx = distortBiasDx;
-		params.mDistortBiasDy = distortBiasDy;
-		params.mDesaturate = desaturate;
-		params.mChannelOrder = ANON_ORDER_BGRA;
-		params.mCellNoise = cellNoise;
-		params.mColorNoise = colorNoise;
-
-		// Layer 1: distortion, input frame -> tmpA
-		params.mSrcPitch = srcPitch;
-		params.mDstPitch = width;
-		Dispatch(encoder, mPipelines[kKernelDistort], srcBuffer, tmpA, params);
-
-		params.mSrcPitch = width;
-		params.mDstPitch = width;
-		if (blurAfterMosaic && blurRadiusInt >= 1)
-		{
-			Dispatch(encoder, mPipelines[kKernelMosaic], tmpA, tmpB, params);
-			params.mBlurDir = 0;
-			Dispatch(encoder, mPipelines[kKernelBlur], tmpB, tmpA, params);
-			params.mBlurDir = 1;
-			params.mDstPitch = dstPitch;
-			Dispatch(encoder, mPipelines[kKernelBlur], tmpA, dstBuffer, params);
-		}
-		else
-		{
-			if (blurRadiusInt >= 1)
-			{
-				params.mBlurDir = 0;
-				Dispatch(encoder, mPipelines[kKernelBlur], tmpA, tmpB, params);
-				params.mBlurDir = 1;
-				Dispatch(encoder, mPipelines[kKernelBlur], tmpB, tmpA, params);
-			}
-			params.mDstPitch = dstPitch;
-			Dispatch(encoder, mPipelines[kKernelMosaic], tmpA, dstBuffer, params);
-		}
+		AnonEncodeLayeredPasses(
+			[&](int kernel, id<MTLBuffer> in, id<MTLBuffer> out, id<MTLBuffer> aux,
+				const AnonParamsHost& params) {
+				Dispatch(encoder, mPipelines[kernel], in, out, params, aux);
+			},
+			settings, width, height, is16f, srcBuffer, srcPitch, dstBuffer, dstPitch, tmpA, tmpB);
 
 		[encoder endEncoding];
 		[commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
@@ -314,12 +300,14 @@ private:
 		id<MTLComputePipelineState> inPipeline,
 		id<MTLBuffer> inSrc,
 		id<MTLBuffer> inDst,
-		const AnonParamsHost& inParams)
+		const AnonParamsHost& inParams,
+		id<MTLBuffer> inAux = nil)
 	{
 		[inEncoder setComputePipelineState:inPipeline];
 		[inEncoder setBuffer:inSrc offset:0 atIndex:0];
 		[inEncoder setBuffer:inDst offset:0 atIndex:1];
 		[inEncoder setBytes:&inParams length:sizeof(inParams) atIndex:2];
+		[inEncoder setBuffer:(inAux ? inAux : inSrc) offset:0 atIndex:3];
 		MTLSize threadsPerGroup = {16, 16, 1};
 		MTLSize numThreadgroups = {
 			DivideRoundUp(inParams.mWidth, threadsPerGroup.width),

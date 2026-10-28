@@ -1,5 +1,5 @@
 /*
-** Multi-Layer Anonymizer FxPlug - XPC service entry point.
+** Redact Anonymizer FxPlug - XPC service entry point.
 */
 
 #import <FxPlug/FxPlugSDK.h>

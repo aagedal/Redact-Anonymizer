@@ -1,5 +1,5 @@
 /*
-** Multi-Layer Anonymizer - FxPlug 4 tileable effect implementation.
+** Redact Anonymizer - FxPlug 4 tileable effect implementation.
 **
 ** Same algorithm as the Premiere Pro and OFX plugins: value-noise distortion
 ** -> Gaussian blur -> mosaic -> desaturation, plus a Blackout override. The
@@ -35,24 +35,20 @@ enum
 	kParamID_EnableDistort = 15,
 	kParamID_EnableBlur = 16,
 	kParamID_EnableMosaic = 17,
+	kParamID_SmoothJitter = 18,
+	kParamID_FrostedGlass = 19,
+	kParamID_FrostAmount = 20,
+	kParamID_FrostColor = 21,
 };
 
+// Parameters at the render time, passed from pluginState to the render as
+// raw bytes (all members are trivially copyable).
 typedef struct
 {
-	double distortAmount;
-	double distortScale;
-	double blurRadius;
-	double mosaicSize;
-	uint32_t seed;
+	AnonAlgo::UserParams user;
+	AnonAlgo::Warp warp;
+	uint32_t cellSeed;
 	int32_t blackout;
-	int32_t mosaicShape;
-	int32_t blurAfterMosaic;
-	double desaturate; // 0..100
-	double cellNoise; // 0..100
-	double colorNoise; // 0..100
-	int32_t enableDistort;
-	int32_t enableBlur;
-	int32_t enableMosaic;
 } AnonFxState;
 
 typedef struct { int width; int height; } AnonCopyParamsHost;
@@ -197,6 +193,10 @@ typedef struct { int width; int height; int tileOffsetX; int tileOffsetY; } Anon
 	                                 parameterID:kParamID_TemporalJitter
 	                                defaultValue:YES
 	                              parameterFlags:kFxParameterFlag_DEFAULT];
+	ok = ok && [paramAPI addToggleButtonWithName:@"Smooth Jitter"
+	                                 parameterID:kParamID_SmoothJitter
+	                                defaultValue:YES
+	                              parameterFlags:kFxParameterFlag_DEFAULT];
 	ok = ok && [paramAPI addToggleButtonWithName:@"Blackout"
 	                                 parameterID:kParamID_Blackout
 	                                defaultValue:NO
@@ -242,6 +242,28 @@ typedef struct { int width; int height; int tileOffsetX; int tileOffsetY; } Anon
 	                                        delta:0.01
 	                               parameterFlags:kFxParameterFlag_DEFAULT];
 
+	ok = ok && [paramAPI addToggleButtonWithName:@"Frosted Glass"
+	                                 parameterID:kParamID_FrostedGlass
+	                                defaultValue:NO
+	                              parameterFlags:kFxParameterFlag_DEFAULT];
+
+	ok = ok && [paramAPI addPercentSliderWithName:@"Frost Amount"
+	                                  parameterID:kParamID_FrostAmount
+	                                 defaultValue:FROST_AMOUNT_DFLT / 100.0
+	                                 parameterMin:FROST_AMOUNT_MIN / 100.0
+	                                 parameterMax:FROST_AMOUNT_MAX / 100.0
+	                                    sliderMin:FROST_AMOUNT_MIN / 100.0
+	                                    sliderMax:FROST_AMOUNT_MAX / 100.0
+	                                        delta:0.01
+	                               parameterFlags:kFxParameterFlag_DEFAULT];
+
+	ok = ok && [paramAPI addColorParameterWithName:@"Frost Colour"
+	                                   parameterID:kParamID_FrostColor
+	                                    defaultRed:FROST_COLOR_DFLT
+	                                  defaultGreen:FROST_COLOR_DFLT
+	                                   defaultBlue:FROST_COLOR_DFLT
+	                                parameterFlags:kFxParameterFlag_DEFAULT];
+
 	if (!ok && error != NULL)
 		*error = [NSError errorWithDomain:FxPlugErrorDomain
 		                             code:kFxError_InvalidParameter
@@ -284,41 +306,52 @@ typedef struct { int width; int height; int tileOffsetX; int tileOffsetY; } Anon
 	}
 
 	AnonFxState state = {};
-	BOOL jitterState = YES;
-	BOOL blackoutState = NO;
-	BOOL blurAfterMosaicState = NO;
-	BOOL sessionKeyState = YES;
-	int seedValue = 0;
-	[paramAPI getFloatValue:&state.distortAmount fromParameter:kParamID_DistortAmount atTime:renderTime];
-	[paramAPI getFloatValue:&state.distortScale fromParameter:kParamID_DistortScale atTime:renderTime];
-	[paramAPI getFloatValue:&state.blurRadius fromParameter:kParamID_BlurRadius atTime:renderTime];
-	[paramAPI getFloatValue:&state.mosaicSize fromParameter:kParamID_MosaicSize atTime:renderTime];
-	[paramAPI getIntValue:&seedValue fromParameter:kParamID_Seed atTime:renderTime];
-	[paramAPI getBoolValue:&jitterState fromParameter:kParamID_TemporalJitter atTime:renderTime];
-	[paramAPI getBoolValue:&blackoutState fromParameter:kParamID_Blackout atTime:renderTime];
-	[paramAPI getBoolValue:&sessionKeyState fromParameter:kParamID_SessionKey atTime:renderTime];
-	double desaturate = 0.0;
-	[paramAPI getFloatValue:&desaturate fromParameter:kParamID_Desaturate atTime:renderTime];
-	state.desaturate = desaturate * 100.0;
-	double cellNoise = 0.0;
-	[paramAPI getFloatValue:&cellNoise fromParameter:kParamID_CellNoise atTime:renderTime];
-	state.cellNoise = cellNoise * 100.0;
-	double colorNoise = 0.0;
-	[paramAPI getFloatValue:&colorNoise fromParameter:kParamID_ColorNoise atTime:renderTime];
-	state.colorNoise = colorNoise * 100.0;
+	AnonAlgo::UserParams& user = state.user;
+	[paramAPI getFloatValue:&user.distortAmount fromParameter:kParamID_DistortAmount atTime:renderTime];
+	[paramAPI getFloatValue:&user.distortScale fromParameter:kParamID_DistortScale atTime:renderTime];
+	[paramAPI getFloatValue:&user.blurRadius fromParameter:kParamID_BlurRadius atTime:renderTime];
+	[paramAPI getFloatValue:&user.mosaicSize fromParameter:kParamID_MosaicSize atTime:renderTime];
+	// Percent sliders deliver 0..1; UserParams holds percent.
+	double fraction = 0.0;
+	[paramAPI getFloatValue:&fraction fromParameter:kParamID_Desaturate atTime:renderTime];
+	user.desaturate = fraction * 100.0;
+	fraction = CELL_NOISE_DFLT / 100.0;
+	[paramAPI getFloatValue:&fraction fromParameter:kParamID_CellNoise atTime:renderTime];
+	user.cellNoise = fraction * 100.0;
+	fraction = COLOR_NOISE_DFLT / 100.0;
+	[paramAPI getFloatValue:&fraction fromParameter:kParamID_ColorNoise atTime:renderTime];
+	user.colorNoise = fraction * 100.0;
+	fraction = FROST_AMOUNT_DFLT / 100.0;
+	[paramAPI getFloatValue:&fraction fromParameter:kParamID_FrostAmount atTime:renderTime];
+	user.frostAmount = fraction * 100.0;
+	[paramAPI getRedValue:&user.frostColor[0] greenValue:&user.frostColor[1]
+		blueValue:&user.frostColor[2] fromParameter:kParamID_FrostColor atTime:renderTime];
 	BOOL enableDistort = YES, enableBlur = YES, enableMosaic = YES;
+	BOOL blurAfterMosaic = NO, frostedGlass = NO, blackout = NO;
 	[paramAPI getBoolValue:&enableDistort fromParameter:kParamID_EnableDistort atTime:renderTime];
 	[paramAPI getBoolValue:&enableBlur fromParameter:kParamID_EnableBlur atTime:renderTime];
 	[paramAPI getBoolValue:&enableMosaic fromParameter:kParamID_EnableMosaic atTime:renderTime];
-	state.enableDistort = enableDistort ? 1 : 0;
-	state.enableBlur = enableBlur ? 1 : 0;
-	state.enableMosaic = enableMosaic ? 1 : 0;
-	state.blackout = blackoutState ? 1 : 0;
-	[paramAPI getBoolValue:&blurAfterMosaicState fromParameter:kParamID_BlurAfterMosaic atTime:renderTime];
-	state.blurAfterMosaic = blurAfterMosaicState ? 1 : 0;
+	[paramAPI getBoolValue:&blurAfterMosaic fromParameter:kParamID_BlurAfterMosaic atTime:renderTime];
+	[paramAPI getBoolValue:&frostedGlass fromParameter:kParamID_FrostedGlass atTime:renderTime];
+	[paramAPI getBoolValue:&blackout fromParameter:kParamID_Blackout atTime:renderTime];
+	user.enableDistort = enableDistort;
+	user.enableBlur = enableBlur;
+	user.enableMosaic = enableMosaic;
+	user.blurAfterMosaic = blurAfterMosaic;
+	user.frostedGlass = frostedGlass;
+	state.blackout = blackout ? 1 : 0;
 	int shapeValue = 0;
 	[paramAPI getIntValue:&shapeValue fromParameter:kParamID_MosaicShape atTime:renderTime];
-	state.mosaicShape = (shapeValue >= 0 && shapeValue <= 2) ? shapeValue : 0;
+	user.mosaicShape = shapeValue;
+
+	BOOL jitterState = YES;
+	BOOL smoothJitterState = YES;
+	BOOL sessionKeyState = YES;
+	int seedValue = 0;
+	[paramAPI getIntValue:&seedValue fromParameter:kParamID_Seed atTime:renderTime];
+	[paramAPI getBoolValue:&jitterState fromParameter:kParamID_TemporalJitter atTime:renderTime];
+	[paramAPI getBoolValue:&smoothJitterState fromParameter:kParamID_SmoothJitter atTime:renderTime];
+	[paramAPI getBoolValue:&sessionKeyState fromParameter:kParamID_SessionKey atTime:renderTime];
 
 	// Frame index for the temporal jitter, derived from the timeline frame
 	// rate. Falls back to seconds * 30 if the timing API is unavailable.
@@ -338,8 +371,9 @@ typedef struct { int width; int height; int tileOffsetX; int tileOffsetY; } Anon
 	}
 	// pluginState and the render run in the same service process, so they
 	// see the same session key.
-	state.seed = AnonComputeSeed((double)seedValue, jitterState, frame,
-		sessionKeyState ? AnonAlgo::SessionKey() : 0u);
+	const uint32_t key = sessionKeyState ? AnonAlgo::SessionKey() : 0u;
+	state.warp = AnonAlgo::ComputeWarp((double)seedValue, jitterState, smoothJitterState, frame, key);
+	state.cellSeed = AnonAlgo::ComputeCellSeed((double)seedValue, key);
 
 	*pluginState = [NSData dataWithBytes:&state length:sizeof(state)];
 	return *pluginState != nil;
@@ -418,8 +452,9 @@ typedef struct { int width; int height; int tileOffsetX; int tileOffsetY; } Anon
 
 	// Pixel-space parameters are relative to 1080p; the shorter frame
 	// dimension reflects proxy/preview scaling and is orientation-invariant
-	// (portrait vs landscape timelines).
-	const float ds = AnonResolutionScale(width, height);
+	// (portrait vs landscape timelines). Texture reads are always RGBA.
+	const AnonAlgo::LayerSettings settings = AnonAlgo::MakeLayerSettings(state.user,
+		AnonResolutionScale(width, height), state.warp, state.cellSeed, ANON_ORDER_RGBA);
 
 	id<MTLTexture> srcTexture = [srcImage metalTextureForDevice:device];
 	id<MTLTexture> dstTexture = [destinationImage metalTextureForDevice:device];
@@ -437,34 +472,6 @@ typedef struct { int width; int height; int tileOffsetX; int tileOffsetY; } Anon
 	id<MTLBuffer> bufB = [device newBufferWithLength:bufBytes options:MTLResourceStorageModePrivate];
 	if (bufSrc == nil || bufA == nil || bufB == nil)
 		return NO;
-
-	// __block: dispatchPass below must see later changes (mBlurDir); a plain
-	// capture would freeze the values at block creation.
-	__block AnonParamsHost params = {};
-	params.mSrcPitch = width;
-	params.mDstPitch = width;
-	params.m16f = 0;
-	params.mWidth = width;
-	params.mHeight = height;
-	const float blurRadius = AnonAlgo::LayerStrength(state.blurRadius, BLUR_RADIUS_MIN,
-		state.enableBlur != 0, ds, 0.0f);
-	params.mBlurRadius = (int)fminf(ceilf(blurRadius), 512.0f);
-	params.mBlurDir = 0;
-	params.mDistortAmount = AnonAlgo::LayerStrength(state.distortAmount, DISTORT_AMOUNT_MIN,
-		state.enableDistort != 0, ds, 0.0f);
-	params.mDistortScale = fmaxf((float)state.distortScale * ds, 2.0f);
-	params.mBlurSigma = fmaxf(blurRadius * 0.5f, 0.1f);
-	// 1 px blocks disable the mosaic pass (and with it the cell/colour noise).
-	params.mMosaicSize = AnonAlgo::LayerStrength(state.mosaicSize, MOSAIC_SIZE_MIN,
-		state.enableMosaic != 0, ds, 1.0f);
-	params.mMosaicShape = state.mosaicShape;
-	params.mSeed = state.seed;
-	AnonAlgo::DisplacementBias(width, height, params.mDistortScale, params.mSeed,
-		&params.mDistortBiasDx, &params.mDistortBiasDy);
-	params.mDesaturate = (float)(state.desaturate / 100.0);
-	params.mCellNoise = (float)(state.cellNoise / 100.0);
-	params.mColorNoise = (float)(state.colorNoise / 100.0);
-	params.mChannelOrder = ANON_ORDER_RGBA; // texture reads are always RGBA
 
 	id<MTLCommandBuffer> commandBuffer = [cache.queue commandBuffer];
 	commandBuffer.label = @"MultiLayerAnonymizer";
@@ -484,43 +491,38 @@ typedef struct { int width; int height; int tileOffsetX; int tileOffsetY; } Anon
 	[compute setBytes:&copyParams length:sizeof(copyParams) atIndex:1];
 	[compute dispatchThreadgroups:fullGrid threadsPerThreadgroup:threadsPerGroup];
 
-	// Run the layered passes (or blackout) over the full frame; result in bufB.
-	void (^dispatchPass)(id<MTLComputePipelineState>, id<MTLBuffer>, id<MTLBuffer>) =
-		^(id<MTLComputePipelineState> pso, id<MTLBuffer> src, id<MTLBuffer> dst)
+	// Run the layered passes (or blackout) over the full frame. The chain
+	// writes its result back into bufSrc, which only its first pass reads.
+	auto dispatchPass = [&](id<MTLComputePipelineState> pso, id<MTLBuffer> src, id<MTLBuffer> dst,
+		id<MTLBuffer> aux, const AnonParamsHost& params)
 	{
 		[compute setComputePipelineState:pso];
 		[compute setBuffer:src offset:0 atIndex:0];
 		[compute setBuffer:dst offset:0 atIndex:1];
 		[compute setBytes:&params length:sizeof(params) atIndex:2];
+		[compute setBuffer:aux offset:0 atIndex:3];
 		[compute dispatchThreadgroups:fullGrid threadsPerThreadgroup:threadsPerGroup];
 	};
 
+	id<MTLBuffer> result = bufSrc;
 	if (state.blackout)
 	{
-		dispatchPass(cache.psoBlackout, bufSrc, bufB);
+		AnonParamsHost params = {};
+		params.mSrcPitch = width;
+		params.mDstPitch = width;
+		params.mWidth = width;
+		params.mHeight = height;
+		dispatchPass(cache.psoBlackout, bufSrc, bufA, bufSrc, params);
+		result = bufA;
 	}
 	else
 	{
-		dispatchPass(cache.psoDistort, bufSrc, bufA);
-		if (state.blurAfterMosaic && params.mBlurRadius >= 1)
-		{
-			dispatchPass(cache.psoMosaic, bufA, bufB);
-			params.mBlurDir = 0;
-			dispatchPass(cache.psoBlur, bufB, bufA);
-			params.mBlurDir = 1;
-			dispatchPass(cache.psoBlur, bufA, bufB);
-		}
-		else
-		{
-			if (params.mBlurRadius >= 1)
-			{
-				params.mBlurDir = 0;
-				dispatchPass(cache.psoBlur, bufA, bufB);
-				params.mBlurDir = 1;
-				dispatchPass(cache.psoBlur, bufB, bufA);
-			}
-			dispatchPass(cache.psoMosaic, bufA, bufB);
-		}
+		AnonEncodeLayeredPasses(
+			[&](int kernel, id<MTLBuffer> in, id<MTLBuffer> out, id<MTLBuffer> aux,
+				const AnonParamsHost& params) {
+				dispatchPass([cache layerPipeline:kernel], in, out, aux, params);
+			},
+			settings, width, height, 0, bufSrc, width, bufSrc, width, bufA, bufB);
 	}
 	[compute endEncoding];
 
@@ -535,7 +537,7 @@ typedef struct { int width; int height; int tileOffsetX; int tileOffsetY; } Anon
 	[render setViewport:viewport];
 	[render setRenderPipelineState:outputPipeline];
 	AnonOutParamsHost outParams = { width, height, tileOffsetX, tileOffsetY };
-	[render setFragmentBuffer:bufB offset:0 atIndex:0];
+	[render setFragmentBuffer:result offset:0 atIndex:0];
 	[render setFragmentBytes:&outParams length:sizeof(outParams) atIndex:1];
 	[render drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 	[render endEncoding];

@@ -1,5 +1,5 @@
 /*
-** Multi-Layer Anonymizer - Photoshop filter plugin.
+** Redact Anonymizer - Photoshop filter plugin.
 **
 ** Shared declarations between the filter logic (AnonymizerPS.cpp) and the
 ** Cocoa parameter dialog (AnonymizerPSUI.mm). The pixel pipeline itself
@@ -15,8 +15,10 @@
 #include "PIAbout.h"
 #include "PIFilter.h"
 
+#include "AnonymizerAlgo.h"
+
 #ifndef ANONYMIZER_NAME
-#define ANONYMIZER_NAME "Multi-Layer Anonymizer"
+#define ANONYMIZER_NAME "Redact Anonymizer"
 #endif
 
 /*
@@ -40,7 +42,40 @@ typedef struct PSParameters
 	int32 enableDistort; /* layer switches, for previewing the others */
 	int32 enableBlur;
 	int32 enableMosaic;
+	int32 frostedGlass;
+	double frostAmount; /* 0..100 */
+	double frostColor[3]; /* R, G, B, 0..1 */
 } PSParameters;
+
+/*
+** The shared layer settings for a run. ds is the resolution scale of the
+** document (or of the proxy, for the preview); seed is the run's random
+** seed; gray documents have no colour to remove.
+*/
+inline AnonAlgo::LayerSettings PSLayerSettings(const PSParameters& p, float ds, uint32_t seed,
+	bool gray)
+{
+	AnonAlgo::UserParams u;
+	u.distortAmount = p.distortAmount;
+	u.distortScale = p.distortScale;
+	u.blurRadius = p.blurRadius;
+	u.mosaicSize = p.mosaicSize;
+	u.enableDistort = p.enableDistort != 0;
+	u.enableBlur = p.enableBlur != 0;
+	u.enableMosaic = p.enableMosaic != 0;
+	u.mosaicShape = (int)p.mosaicShape;
+	u.blurAfterMosaic = p.blurAfterMosaic != 0;
+	u.desaturate = gray ? 0.0 : p.desaturate;
+	u.cellNoise = p.cellNoise;
+	u.colorNoise = p.colorNoise;
+	u.frostedGlass = p.frostedGlass != 0;
+	u.frostAmount = p.frostAmount;
+	u.frostColor[0] = p.frostColor[0];
+	u.frostColor[1] = p.frostColor[1];
+	u.frostColor[2] = p.frostColor[2];
+	return AnonAlgo::MakeLayerSettings(u, ds, AnonAlgo::StaticWarp(seed),
+		AnonAlgo::CellSeedFor(seed), ANON_ORDER_RGBA);
+}
 
 /*
 ** Downscaled copy of the filtered region for the dialog's live preview.
@@ -72,9 +107,6 @@ void DoAboutDialog(void);
 ** the packed RGBA float buffer using the shared MSL kernels. Returns false
 ** on any failure - the caller falls back to the identical CPU pipeline.
 */
-bool RunMetalPasses(float* buf, int w, int h,
-	float amount, float scale, float blurRadius, float mosaicSize,
-	int mosaicShape, uint32_t seed, bool blurAfterMosaic, float desaturate,
-	float cellNoise, float colorNoise);
+bool RunMetalPasses(float* buf, int w, int h, const AnonAlgo::LayerSettings& settings);
 
 #endif

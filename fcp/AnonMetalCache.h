@@ -1,5 +1,5 @@
 /*
-** Multi-Layer Anonymizer FxPlug - per-device Metal pipeline cache.
+** Redact Anonymizer FxPlug - per-device Metal pipeline cache.
 */
 
 #import <Foundation/Foundation.h>
@@ -9,10 +9,9 @@
 @property (strong) id<MTLDevice> device;
 @property (strong) id<MTLCommandQueue> queue;
 @property (strong) id<MTLComputePipelineState> psoCopyIn;
-@property (strong) id<MTLComputePipelineState> psoDistort;
-@property (strong) id<MTLComputePipelineState> psoBlur;
-@property (strong) id<MTLComputePipelineState> psoMosaic;
 @property (strong) id<MTLComputePipelineState> psoBlackout;
+// Pipeline for a layered-pass kernel (ANON_KERNEL_* in AnonymizerKernel.h).
+- (id<MTLComputePipelineState>)layerPipeline:(int)kernel;
 - (id<MTLRenderPipelineState>)renderPipelineForPixelFormat:(MTLPixelFormat)format;
 @end
 
